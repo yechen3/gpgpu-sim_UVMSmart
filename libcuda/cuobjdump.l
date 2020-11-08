@@ -136,14 +136,8 @@ newlines	{newline}+
 <ptxheader>"producer = "		return H_PRODUCER;
 <ptxheader>"host = "			return H_HOST;
 <ptxheader>"compile_size = "	BEGIN(endheader); return H_COMPILESIZE;
-
-
-
-
-
-
-	/* Looking for the identifier (filename) then the header is done */
-	/* <endheader>[[:alnum:]_\./]+	yylval.string_value = strdup(yytext); yy_pop_state(); return FILENAME; */
+	
+    
 <endheader>{notnewline}+	yylval.string_value = strdup(yytext); yy_pop_state(); return IDENTIFIER;
 
 
