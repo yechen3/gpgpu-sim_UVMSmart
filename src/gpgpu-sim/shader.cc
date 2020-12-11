@@ -1743,6 +1743,7 @@ bool ldst_unit::access_cycle(warp_inst_t &inst,
 bool ldst_unit::memory_cycle(warp_inst_t &inst,
                              mem_stage_stall_type &stall_reason,
                              mem_stage_access_type &access_type) {
+  inst.print_m_accessq();
   if (m_gmmu_cu_queue.empty()) {
     if (inst.empty() || inst.accessq_empty() ||
         ((inst.space.get_type() != global_space) &&
@@ -2255,6 +2256,7 @@ inst->space.get_type() != shared_space) { unsigned warp_id = inst->warp_id();
 }
 */
 void ldst_unit::cycle() {
+  //print(stdout);
   writeback();
   m_operand_collector->step();
   for (unsigned stage = 0; (stage + 1) < m_pipeline_depth; stage++)

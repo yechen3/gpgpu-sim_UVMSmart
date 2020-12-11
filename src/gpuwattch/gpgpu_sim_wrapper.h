@@ -115,9 +115,9 @@ private:
   int kernel_sample_count;    // # of samples per kernel
   int total_sample_count;     // # of samples per benchmark
 
-  std::vector<avg_max_min_counters<double>>
+  std::vector<avg_max_min_counters<double> >
       kernel_cmp_pwr; // Per-kernel component power avg/max/min values
-  std::vector<avg_max_min_counters<double>>
+  std::vector<avg_max_min_counters<double> >
       kernel_cmp_perf_counters; // Per-kernel component avg/max/min performance
                                 // counters
 

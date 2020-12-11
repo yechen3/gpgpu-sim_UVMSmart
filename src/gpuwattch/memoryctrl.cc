@@ -35,20 +35,19 @@
  *University of British Columbia         * Ahmed ElTantawy, University of
  *British Columbia             *
  ********************************************************************/
-#include "memoryctrl.h"
-#include "XML_Parse.h"
-#include "basic_components.h"
-#include "cacti/basic_circuit.h"
-#include "const.h"
 #include "io.h"
-#include "logic.h"
 #include "parameter.h"
-#include <algorithm>
-#include <assert.h>
-#include <cmath>
+#include "const.h"
+#include "logic.h"
+#include "cacti/basic_circuit.h"
 #include <iostream>
+#include <algorithm>
+#include "XML_Parse.h"
 #include <string>
-
+#include <cmath>
+#include <assert.h>
+#include "memoryctrl.h"
+#include "basic_components.h"
 /* overview of MC models:
  * McPAT memory controllers are modeled according to large number of industrial
  * data points. The Basic memory controller architecture is base on the Synopsis

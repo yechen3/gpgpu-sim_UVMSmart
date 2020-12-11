@@ -67,11 +67,13 @@
 #ifndef CUDA_MATH
 #define CUDA_MATH
 
+#include <cmath>
+
 // cuda math implementations
 #undef max
 #undef min
 namespace cuda_math {
-#define __attribute__(a) // to remove warnings inside math_functions.h
+#define __attribute__(a)  // to remove warnings inside math_functions.h
 #undef INT_MAX
 
 #if CUDART_VERSION < 3000
@@ -95,7 +97,7 @@ typedef struct uint4 uint4;
 typedef struct float4 float4;
 typedef struct float2 float2;
 
-extern float rsqrtf(float); // CUDA 2.3 beta
+extern float rsqrtf(float);  // CUDA 2.3 beta
 
 #define CUDA_FLOAT_MATH_FUNCTIONS
 #include <device_types.h>
@@ -269,20 +271,20 @@ float __ull2float_rd(unsigned long long int a) {
 int float2int(float a, enum cudaRoundMode mode) {
   int tmp;
   switch (mode) {
-  case cuda_math::cudaRoundZero:
-    tmp = truncf(a);
-    break;
-  case cuda_math::cudaRoundNearest:
-    tmp = nearbyintf(a);
-    break;
-  case cuda_math::cudaRoundMinInf:
-    tmp = floorf(a);
-    break;
-  case cuda_math::cudaRoundPosInf:
-    tmp = ceilf(a);
-    break;
-  default:
-    abort();
+    case cudaRoundZero:
+      tmp = truncf(a);
+      break;
+    case cudaRoundNearest:
+      tmp = nearbyintf(a);
+      break;
+    case cudaRoundMinInf:
+      tmp = floorf(a);
+      break;
+    case cudaRoundPosInf:
+      tmp = ceilf(a);
+      break;
+    default:
+      abort();
   }
   return tmp;
 }
@@ -295,20 +297,20 @@ int __internal_float2int(float a, enum cudaRoundMode mode) {
 unsigned int float2uint(float a, enum cudaRoundMode mode) {
   unsigned int tmp;
   switch (mode) {
-  case cuda_math::cudaRoundZero:
-    tmp = truncf(a);
-    break;
-  case cuda_math::cudaRoundNearest:
-    tmp = nearbyintf(a);
-    break;
-  case cuda_math::cudaRoundMinInf:
-    tmp = floorf(a);
-    break;
-  case cuda_math::cudaRoundPosInf:
-    tmp = ceilf(a);
-    break;
-  default:
-    abort();
+    case cudaRoundZero:
+      tmp = truncf(a);
+      break;
+    case cudaRoundNearest:
+      tmp = nearbyintf(a);
+      break;
+    case cudaRoundMinInf:
+      tmp = floorf(a);
+      break;
+    case cudaRoundPosInf:
+      tmp = ceilf(a);
+      break;
+    default:
+      abort();
   }
   return tmp;
 }
@@ -325,7 +327,7 @@ float __internal_accurate_fdividef(float a, float b) { return fdividef(a, b); }
 // intrinsic for saturate  (clamp values beyond 0 and 1)
 float __saturatef(float a) {
   float b;
-  if (isnan(a))
+  if (std::isnan(a))
     b = 0.0f;
   else if (a >= 1.0f)
     b = 1.0f;
@@ -342,7 +344,7 @@ float __powf(float a, float b) { return powf(a, b); }
 // math functions missing in Mac OSX GCC
 #ifdef __APPLE__
 int __signbitd(double d) {
-  unsigned long long int u = *((unsigned long long int *)&d);
+  unsigned long long int u = *((unsigned long long int*)&d);
   return ((u & 0x8000000000000000ULL) != 0);
 }
 #endif
@@ -355,11 +357,11 @@ int __signbitd(double d) {
 
 #endif
 
-} // namespace cuda_math
+}  // namespace cuda_math
 
 // math functions missing in Mac OSX GCC
 #ifdef __APPLE__
-int isnanf(float a) { return (isnan(a)); }
+int isnanf(float a) { return (std::isnan(a)); }
 #endif
 
 #endif

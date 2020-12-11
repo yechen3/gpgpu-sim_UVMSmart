@@ -10,13 +10,13 @@ unsigned long long g_max_total_param_size = 0;
 #if (CUDART_VERSION >= 5000)
 #define __CUDA_RUNTIME_API_H__
 
+#include <builtin_types.h>
+#include <driver_types.h>
 #include "../gpgpu-sim/gpu-sim.h"
 #include "../stream_manager.h"
 #include "cuda-sim.h"
 #include "cuda_device_runtime.h"
 #include "ptx_ir.h"
-#include <builtin_types.h>
-#include <driver_types.h>
 
 #define DEV_RUNTIME_REPORT(a)                                                  \
   if (g_debug_execution) {                                                     \
