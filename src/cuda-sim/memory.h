@@ -41,10 +41,10 @@
 
 #include <assert.h>
 #include <list>
-#include <map>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <map>
 #include <string>
 
 typedef address_type mem_addr_t;
@@ -59,8 +59,9 @@ typedef struct _eviction_t {
 
 #define MEM_BLOCK_SIZE (4 * 1024)
 
-template <unsigned BSIZE> class mem_storage {
-public:
+template <unsigned BSIZE>
+class mem_storage {
+ public:
   mem_storage(const mem_storage &another) {
     m_data = (unsigned char *)calloc(1, BSIZE);
     memcpy(m_data, another.m_data, BSIZE);
@@ -75,8 +76,8 @@ public:
 
     counter = 0;
   }
-  mem_storage() {
-    m_data = (unsigned char *)calloc(1, BSIZE);
+  mem_storage() { 
+    m_data = (unsigned char *)calloc(1, BSIZE); 
 
     // initialize page as unmanaged
     managed = false;
@@ -85,6 +86,7 @@ public:
     valid = false;
     dirty = false;
     access = false;
+
     counter = 0;
   }
   ~mem_storage() { free(m_data); }
@@ -102,7 +104,7 @@ public:
   void print(const char *format, FILE *fout) const {
     unsigned int *i_data = (unsigned int *)m_data;
     for (int d = 0; d < (BSIZE / sizeof(unsigned int)); d++) {
-      if (d % 8 == 0) {
+      if (d % 1 == 0) {
         fprintf(fout, "\n");
       }
       fprintf(fout, format, i_data[d]);
@@ -111,6 +113,7 @@ public:
     fprintf(fout, "\n");
     fflush(fout);
   }
+
   // set the flag of managed into true in order to distinguish it from the
   // unmanaged allocation
   void set_managed() { managed = true; }
@@ -129,7 +132,7 @@ public:
   void clear_access() { access = false; }
   bool is_access() { return access; }
 
-private:
+ private:
   unsigned m_nbytes;
   unsigned char *m_data;
 
@@ -154,10 +157,12 @@ class ptx_thread_info;
 class ptx_instruction;
 
 class memory_space {
-public:
+ public:
   virtual ~memory_space() {}
   virtual void write(mem_addr_t addr, size_t length, const void *data,
                      ptx_thread_info *thd, const ptx_instruction *pI) = 0;
+  virtual void write_only(mem_addr_t index, mem_addr_t offset, size_t length,
+                          const void *data) = 0;
   virtual void read(mem_addr_t addr, size_t length, void *data) const = 0;
   virtual void print(const char *format, FILE *fout) const = 0;
   virtual void set_watch(addr_t addr, unsigned watchpoint) = 0;
@@ -203,15 +208,19 @@ public:
   virtual void reset() = 0;
 };
 
-template <unsigned BSIZE> class memory_space_impl : public memory_space {
-public:
+template <unsigned BSIZE>
+class memory_space_impl : public memory_space {
+ public:
   memory_space_impl(std::string name, unsigned hash_size,
                     unsigned long long gddr_size = 0);
 
   virtual void write(mem_addr_t addr, size_t length, const void *data,
                      ptx_thread_info *thd, const ptx_instruction *pI);
+  virtual void write_only(mem_addr_t index, mem_addr_t offset, size_t length,
+                          const void *data);
   virtual void read(mem_addr_t addr, size_t length, void *data) const;
   virtual void print(const char *format, FILE *fout) const;
+
   virtual void set_watch(addr_t addr, unsigned watchpoint);
 
   // method to find out whether or not to follow the managed time simulation
@@ -254,7 +263,7 @@ public:
 
   virtual void reset();
 
-private:
+ private:
   void read_single_block(mem_addr_t blk_idx, mem_addr_t addr, size_t length,
                          void *data) const;
   std::string m_name;
@@ -263,7 +272,7 @@ private:
   // map_t m_data closely resembles to a page table
   // the dictionary is keyed by the virtual address
   // mem_storage acts as the physical page
-  typedef mem_map<mem_addr_t, mem_storage<BSIZE>> map_t;
+  typedef mem_map<mem_addr_t, mem_storage<BSIZE> > map_t;
   map_t m_data;
 
   // variable to store total number of 8KB pages in global memory
@@ -275,7 +284,7 @@ private:
 
   // the size of gddr in number of pages
   const size_t num_gddr_pages;
-
+  
   std::map<unsigned, mem_addr_t> m_watchpoints;
 };
 

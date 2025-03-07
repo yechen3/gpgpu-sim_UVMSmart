@@ -1,18 +1,21 @@
-// Copyright (c) 2009-2011, Tor M. Aamodt, Inderpreet Singh, Timothy Rogers,
-// The University of British Columbia
-// All rights reserved.
+// Copyright (c) 2009-2021, Tor M. Aamodt, Inderpreet Singh, Timothy Rogers,
+// Vijay Kandiah, Nikos Hardavellas, Mahmoud Khairy, Junrui Pan, Timothy G.
+// Rogers The University of British Columbia, Northwestern University, Purdue
+// University All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
 //
-// Redistributions of source code must retain the above copyright notice, this
-// list of conditions and the following disclaimer.
-// Redistributions in binary form must reproduce the above copyright notice,
-// this list of conditions and the following disclaimer in the documentation
-// and/or other materials provided with the distribution. Neither the name of
-// The University of British Columbia nor the names of its contributors may be
-// used to endorse or promote products derived from this software without
-// specific prior written permission.
+// 1. Redistributions of source code must retain the above copyright notice,
+// this
+//    list of conditions and the following disclaimer;
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution;
+// 3. Neither the names of The University of British Columbia, Northwestern
+//    University nor the names of their contributors may be used to
+//    endorse or promote products derived from this software without specific
+//    prior written permission.
 //
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
@@ -27,16 +30,87 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "abstract_hardware_model.h"
+#include <sys/stat.h>
+#include <algorithm>
+#include <iostream>
+#include <sstream>
+#include "../libcuda/gpgpu_context.h"
 #include "cuda-sim/cuda-sim.h"
 #include "cuda-sim/memory.h"
 #include "cuda-sim/ptx-stats.h"
 #include "cuda-sim/ptx_ir.h"
 #include "gpgpu-sim/gpu-sim.h"
+#include "gpgpusim_entrypoint.h"
 #include "option_parser.h"
-#include <algorithm>
 
-unsigned mem_access_t::sm_next_access_uid = 0;
-unsigned warp_inst_t::sm_next_uid = 0;
+void mem_access_t::init(gpgpu_context *ctx) {
+  gpgpu_ctx = ctx;
+  m_uid = ++(gpgpu_ctx->sm_next_access_uid);
+  m_addr = 0;
+  m_req_size = 0;
+}
+
+void warp_inst_t::issue(const active_mask_t &mask, unsigned warp_id,
+                        unsigned long long cycle, int dynamic_warp_id,
+                        int sch_id, unsigned long long streamID) {
+  m_warp_active_mask = mask;
+  m_warp_issued_mask = mask;
+  m_uid = ++(m_config->gpgpu_ctx->warp_inst_sm_next_uid);
+  m_streamID = streamID;
+  m_warp_id = warp_id;
+  m_dynamic_warp_id = dynamic_warp_id;
+  issue_cycle = cycle;
+  cycles = initiation_interval;
+  m_cache_hit = false;
+  m_empty = false;
+  m_scheduler_id = sch_id;
+}
+
+checkpoint::checkpoint() {
+  struct stat st = {0};
+
+  if (stat("checkpoint_files", &st) == -1) {
+    mkdir("checkpoint_files", 0777);
+  }
+}
+void checkpoint::load_global_mem(class memory_space *temp_mem, char *f1name) {
+  FILE *fp2 = fopen(f1name, "r");
+  assert(fp2 != NULL);
+  char line[128]; /* or other suitable maximum line size */
+  unsigned int offset = 0;
+  while (fgets(line, sizeof line, fp2) != NULL) /* read a line */
+  {
+    unsigned int index;
+    char *pch;
+    pch = strtok(line, " ");
+    if (pch[0] == 'g' || pch[0] == 's' || pch[0] == 'l') {
+      pch = strtok(NULL, " ");
+
+      std::stringstream ss;
+      ss << std::hex << pch;
+      ss >> index;
+
+      offset = 0;
+    } else {
+      unsigned int data;
+      std::stringstream ss;
+      ss << std::hex << pch;
+      ss >> data;
+      temp_mem->write_only(offset, index, 4, &data);
+      offset = offset + 4;
+    }
+    // fputs ( line, stdout ); /* write the line */
+  }
+  fclose(fp2);
+}
+
+void checkpoint::store_global_mem(class memory_space *mem, char *fname,
+                                  char *format) {
+  FILE *fp3 = fopen(fname, "w");
+  assert(fp3 != NULL);
+  mem->print(format, fp3);
+  fclose(fp3);
+}
 
 void move_warp(warp_inst_t *&dst, warp_inst_t *&src) {
   assert(dst->empty());
@@ -61,6 +135,26 @@ void gpgpu_functional_sim_config::reg_options(class OptionParser *opp) {
                          "Try to extract code from cuda libraries [Broken "
                          "because of unknown cudaGetExportTable]",
                          "0");
+  option_parser_register(opp, "-checkpoint_option", OPT_INT32,
+                         &checkpoint_option,
+                         " checkpointing flag (0 = no checkpoint)", "0");
+  option_parser_register(
+      opp, "-checkpoint_kernel", OPT_INT32, &checkpoint_kernel,
+      " checkpointing during execution of which kernel (1- 1st kernel)", "1");
+  option_parser_register(
+      opp, "-checkpoint_CTA", OPT_INT32, &checkpoint_CTA,
+      " checkpointing after # of CTA (< less than total CTA)", "0");
+  option_parser_register(opp, "-resume_option", OPT_INT32, &resume_option,
+                         " resume flag (0 = no resume)", "0");
+  option_parser_register(opp, "-resume_kernel", OPT_INT32, &resume_kernel,
+                         " Resume from which kernel (1= 1st kernel)", "0");
+  option_parser_register(opp, "-resume_CTA", OPT_INT32, &resume_CTA,
+                         " resume from which CTA ", "0");
+  option_parser_register(opp, "-checkpoint_CTA_t", OPT_INT32, &checkpoint_CTA_t,
+                         " resume from which CTA ", "0");
+  option_parser_register(opp, "-checkpoint_insn_Y", OPT_INT32,
+                         &checkpoint_insn_Y, " resume from which CTA ", "0");
+
   option_parser_register(
       opp, "-gpgpu_ptx_convert_to_ptxplus", OPT_BOOL, &m_ptx_convert_to_ptxplus,
       "Convert SASS (native ISA) to ptxplus and run ptxplus", "0");
@@ -107,9 +201,10 @@ void gpgpu_functional_sim_config::convert_byte_string() {
     exit(1);
   }
 }
-gpgpu_t::gpgpu_t(const gpgpu_functional_sim_config &config)
-    : m_function_model_config(config) {
 
+gpgpu_t::gpgpu_t(const gpgpu_functional_sim_config &config, gpgpu_context *ctx)
+    : m_function_model_config(config) {
+  gpgpu_ctx = ctx;
   if (config.page_size == 4096) {
     m_global_mem =
         new memory_space_impl<4096>("global", 64 * 1024, config.gddr_size);
@@ -136,13 +231,31 @@ gpgpu_t::gpgpu_t(const gpgpu_functional_sim_config &config)
   // allocation can not be from same page
   m_dev_malloc_managed = (GLOBAL_HEAP_START + GLOBAL_MEM_SIZE_MAX);
 
+  checkpoint_option = m_function_model_config.get_checkpoint_option();
+  checkpoint_kernel = m_function_model_config.get_checkpoint_kernel();
+  checkpoint_CTA = m_function_model_config.get_checkpoint_CTA();
+  resume_option = m_function_model_config.get_resume_option();
+  resume_kernel = m_function_model_config.get_resume_kernel();
+  resume_CTA = m_function_model_config.get_resume_CTA();
+  checkpoint_CTA_t = m_function_model_config.get_checkpoint_CTA_t();
+  checkpoint_insn_Y = m_function_model_config.get_checkpoint_insn_Y();
+
+  // initialize texture mappings to empty
+  m_NameToTextureInfo.clear();
+  m_NameToCudaArray.clear();
+  m_TextureRefToName.clear();
+  m_NameToAttribute.clear();
+
   if (m_function_model_config.get_ptx_inst_debug_to_file() != 0)
     ptx_inst_debug_file =
         fopen(m_function_model_config.get_ptx_inst_debug_file(), "w");
+
+  gpu_sim_cycle = 0;
+  gpu_tot_sim_cycle = 0;
 }
 
-address_type line_size_based_tag_func(new_addr_type address,
-                                      new_addr_type line_size) {
+new_addr_type line_size_based_tag_func(new_addr_type address,
+                                       new_addr_type line_size) {
   // gives the tag for an address based on a given line size
   return address & ~(line_size - 1);
 }
@@ -150,8 +263,8 @@ address_type line_size_based_tag_func(new_addr_type address,
 const char *mem_access_type_str(enum mem_access_type access_type) {
 #define MA_TUP_BEGIN(X) static const char *access_type_str[] = {
 #define MA_TUP(X) #X
-#define MA_TUP_END(X)                                                          \
-  }                                                                            \
+#define MA_TUP_END(X) \
+  }                   \
   ;
   MEM_ACCESS_TYPE_TUP_DEF
 #undef MA_TUP_BEGIN
@@ -166,7 +279,7 @@ const char *mem_access_type_str(enum mem_access_type access_type) {
 void warp_inst_t::clear_active(const active_mask_t &inactive) {
   active_mask_t test = m_warp_active_mask;
   test &= inactive;
-  assert(test == inactive); // verify threads being disabled were active
+  assert(test == inactive);  // verify threads being disabled were active
   m_warp_active_mask &= ~inactive;
 }
 
@@ -193,11 +306,11 @@ void warp_inst_t::do_atomic(bool forceDo) {
 
 void warp_inst_t::do_atomic(const active_mask_t &access_mask, bool forceDo) {
   assert(m_isatomic && (!m_empty || forceDo));
+  if (!should_do_atomic) return;
   for (unsigned i = 0; i < m_config->warp_size; i++) {
     if (access_mask.test(i)) {
       dram_callback_t &cb = m_per_scalar_thread[i].callback;
-      if (cb.thread)
-        cb.function(cb.instruction, cb.thread);
+      if (cb.thread) cb.function(cb.instruction, cb.thread);
     }
   }
 }
@@ -215,210 +328,228 @@ void warp_inst_t::broadcast_barrier_reduction(
 }
 
 void warp_inst_t::generate_mem_accesses() {
-  if (empty() || op == MEMORY_BARRIER_OP || m_mem_accesses_created)
+  if (empty() || op == MEMORY_BARRIER_OP || m_mem_accesses_created) return;
+  if (!((op == LOAD_OP) || (op == TENSOR_CORE_LOAD_OP) || (op == STORE_OP) ||
+        (op == TENSOR_CORE_STORE_OP)))
     return;
-  if (!((op == LOAD_OP) || (op == STORE_OP)))
-    return;
-  if (m_warp_active_mask.count() == 0)
-    return; // predicated off
+  if (m_warp_active_mask.count() == 0) return;  // predicated off
 
   const size_t starting_queue_size = m_accessq.size();
 
   assert(is_load() || is_store());
-  assert(m_per_scalar_thread_valid); // need address information per thread
+
+  // if((space.get_type() != tex_space) && (space.get_type() != const_space))
+  assert(m_per_scalar_thread_valid);  // need address information per thread
 
   bool is_write = is_store();
 
   mem_access_type access_type;
   switch (space.get_type()) {
-  case const_space:
-  case param_space_kernel:
-    access_type = CONST_ACC_R;
-    break;
-  case tex_space:
-    access_type = TEXTURE_ACC_R;
-    break;
-  case global_space:
-    access_type = is_write ? GLOBAL_ACC_W : GLOBAL_ACC_R;
-    break;
-  case local_space:
-  case param_space_local:
-    access_type = is_write ? LOCAL_ACC_W : LOCAL_ACC_R;
-    break;
-  case shared_space:
-    break;
-  default:
-    assert(0);
-    break;
+    case const_space:
+    case param_space_kernel:
+      access_type = CONST_ACC_R;
+      break;
+    case tex_space:
+      access_type = TEXTURE_ACC_R;
+      break;
+    case global_space:
+      access_type = is_write ? GLOBAL_ACC_W : GLOBAL_ACC_R;
+      break;
+    case local_space:
+    case param_space_local:
+      access_type = is_write ? LOCAL_ACC_W : LOCAL_ACC_R;
+      break;
+    case shared_space:
+      break;
+    case sstarr_space:
+      break;
+    default:
+      assert(0);
+      break;
   }
 
   // Calculate memory accesses generated by this warp
-  new_addr_type cache_block_size = 0; // in bytes
+  new_addr_type cache_block_size = 0;  // in bytes
 
   switch (space.get_type()) {
-  case shared_space: {
-    unsigned subwarp_size = m_config->warp_size / m_config->mem_warp_parts;
-    unsigned total_accesses = 0;
-    for (unsigned subwarp = 0; subwarp < m_config->mem_warp_parts; subwarp++) {
+    case shared_space:
+    case sstarr_space: {
+      unsigned subwarp_size = m_config->warp_size / m_config->mem_warp_parts;
+      unsigned total_accesses = 0;
+      for (unsigned subwarp = 0; subwarp < m_config->mem_warp_parts;
+           subwarp++) {
+        // data structures used per part warp
+        std::map<unsigned, std::map<new_addr_type, unsigned> >
+            bank_accs;  // bank -> word address -> access count
 
-      // data structures used per part warp
-      std::map<unsigned, std::map<new_addr_type, unsigned>>
-          bank_accs; // bank -> word address -> access count
-
-      // step 1: compute accesses to words in banks
-      for (unsigned thread = subwarp * subwarp_size;
-           thread < (subwarp + 1) * subwarp_size; thread++) {
-        if (!active(thread))
-          continue;
-        new_addr_type addr = m_per_scalar_thread[thread].memreqaddr[0];
-        // FIXME: deferred allocation of shared memory should not accumulate
-        // across kernel launches assert( addr < m_config->gpgpu_shmem_size );
-        unsigned bank = m_config->shmem_bank_func(addr);
-        new_addr_type word =
-            line_size_based_tag_func(addr, m_config->WORD_SIZE);
-        bank_accs[bank][word]++;
-      }
-
-      if (m_config->shmem_limited_broadcast) {
-        // step 2: look for and select a broadcast bank/word if one occurs
-        bool broadcast_detected = false;
-        new_addr_type broadcast_word = (new_addr_type)-1;
-        unsigned broadcast_bank = (unsigned)-1;
-        std::map<unsigned, std::map<new_addr_type, unsigned>>::iterator b;
-        for (b = bank_accs.begin(); b != bank_accs.end(); b++) {
-          unsigned bank = b->first;
-          std::map<new_addr_type, unsigned> &access_set = b->second;
-          std::map<new_addr_type, unsigned>::iterator w;
-          for (w = access_set.begin(); w != access_set.end(); ++w) {
-            if (w->second > 1) {
-              // found a broadcast
-              broadcast_detected = true;
-              broadcast_bank = bank;
-              broadcast_word = w->first;
-              break;
-            }
-          }
-          if (broadcast_detected)
-            break;
+        // step 1: compute accesses to words in banks
+        for (unsigned thread = subwarp * subwarp_size;
+             thread < (subwarp + 1) * subwarp_size; thread++) {
+          if (!active(thread)) continue;
+          new_addr_type addr = m_per_scalar_thread[thread].memreqaddr[0];
+          // FIXME: deferred allocation of shared memory should not accumulate
+          // across kernel launches assert( addr < m_config->gpgpu_shmem_size );
+          unsigned bank = m_config->shmem_bank_func(addr);
+          new_addr_type word =
+              line_size_based_tag_func(addr, m_config->WORD_SIZE);
+          bank_accs[bank][word]++;
         }
 
-        // step 3: figure out max bank accesses performed, taking account of
-        // broadcast case
-        unsigned max_bank_accesses = 0;
-        for (b = bank_accs.begin(); b != bank_accs.end(); b++) {
-          unsigned bank_accesses = 0;
-          std::map<new_addr_type, unsigned> &access_set = b->second;
-          std::map<new_addr_type, unsigned>::iterator w;
-          for (w = access_set.begin(); w != access_set.end(); ++w)
-            bank_accesses += w->second;
-          if (broadcast_detected && broadcast_bank == b->first) {
+        if (m_config->shmem_limited_broadcast) {
+          // step 2: look for and select a broadcast bank/word if one occurs
+          bool broadcast_detected = false;
+          new_addr_type broadcast_word = (new_addr_type)-1;
+          unsigned broadcast_bank = (unsigned)-1;
+          std::map<unsigned, std::map<new_addr_type, unsigned> >::iterator b;
+          for (b = bank_accs.begin(); b != bank_accs.end(); b++) {
+            unsigned bank = b->first;
+            std::map<new_addr_type, unsigned> &access_set = b->second;
+            std::map<new_addr_type, unsigned>::iterator w;
             for (w = access_set.begin(); w != access_set.end(); ++w) {
-              if (w->first == broadcast_word) {
-                unsigned n = w->second;
-                assert(n > 1); // or this wasn't a broadcast
-                assert(bank_accesses >= (n - 1));
-                bank_accesses -= (n - 1);
+              if (w->second > 1) {
+                // found a broadcast
+                broadcast_detected = true;
+                broadcast_bank = bank;
+                broadcast_word = w->first;
                 break;
               }
             }
+            if (broadcast_detected) break;
           }
-          if (bank_accesses > max_bank_accesses)
-            max_bank_accesses = bank_accesses;
-        }
 
-        // step 4: accumulate
-        total_accesses += max_bank_accesses;
-      } else {
-        // step 2: look for the bank with the maximum number of access to
-        // different words
-        unsigned max_bank_accesses = 0;
-        std::map<unsigned, std::map<new_addr_type, unsigned>>::iterator b;
-        for (b = bank_accs.begin(); b != bank_accs.end(); b++) {
-          max_bank_accesses =
-              std::max(max_bank_accesses, (unsigned)b->second.size());
-        }
+          // step 3: figure out max bank accesses performed, taking account of
+          // broadcast case
+          unsigned max_bank_accesses = 0;
+          for (b = bank_accs.begin(); b != bank_accs.end(); b++) {
+            unsigned bank_accesses = 0;
+            std::map<new_addr_type, unsigned> &access_set = b->second;
+            std::map<new_addr_type, unsigned>::iterator w;
+            for (w = access_set.begin(); w != access_set.end(); ++w)
+              bank_accesses += w->second;
+            if (broadcast_detected && broadcast_bank == b->first) {
+              for (w = access_set.begin(); w != access_set.end(); ++w) {
+                if (w->first == broadcast_word) {
+                  unsigned n = w->second;
+                  assert(n > 1);  // or this wasn't a broadcast
+                  assert(bank_accesses >= (n - 1));
+                  bank_accesses -= (n - 1);
+                  break;
+                }
+              }
+            }
+            if (bank_accesses > max_bank_accesses)
+              max_bank_accesses = bank_accesses;
+          }
 
-        // step 3: accumulate
-        total_accesses += max_bank_accesses;
+          // step 4: accumulate
+          total_accesses += max_bank_accesses;
+        } else {
+          // step 2: look for the bank with the maximum number of access to
+          // different words
+          unsigned max_bank_accesses = 0;
+          std::map<unsigned, std::map<new_addr_type, unsigned> >::iterator b;
+          for (b = bank_accs.begin(); b != bank_accs.end(); b++) {
+            max_bank_accesses =
+                std::max(max_bank_accesses, (unsigned)b->second.size());
+          }
+
+          // step 3: accumulate
+          total_accesses += max_bank_accesses;
+        }
       }
+      assert(total_accesses > 0 && total_accesses <= m_config->warp_size);
+      cycles = total_accesses;  // shared memory conflicts modeled as larger
+                                // initiation interval
+      m_config->gpgpu_ctx->stats->ptx_file_line_stats_add_smem_bank_conflict(
+          pc, total_accesses);
+      break;
     }
-    assert(total_accesses > 0 && total_accesses <= m_config->warp_size);
-    cycles = total_accesses; // shared memory conflicts modeled as larger
-                             // initiation interval
-    ptx_file_line_stats_add_smem_bank_conflict(pc, total_accesses);
-    break;
-  }
 
-  case tex_space:
-    cache_block_size = m_config->gpgpu_cache_texl1_linesize;
-    break;
-  case const_space:
-  case param_space_kernel:
-    cache_block_size = m_config->gpgpu_cache_constl1_linesize;
-    break;
+    case tex_space:
+      cache_block_size = m_config->gpgpu_cache_texl1_linesize;
+      break;
+    case const_space:
+    case param_space_kernel:
+      cache_block_size = m_config->gpgpu_cache_constl1_linesize;
+      break;
 
-  case global_space:
-  case local_space:
-  case param_space_local:
-    if (m_config->gpgpu_coalesce_arch == 13) {
-      if (isatomic())
-        memory_coalescing_arch_13_atomic(is_write, access_type);
-      else
-        memory_coalescing_arch_13(is_write, access_type);
-    } else
+    case global_space:
+    case local_space:
+    case param_space_local:
+      if (m_config->gpgpu_coalesce_arch >= 13) {
+        if (isatomic())
+          memory_coalescing_arch_atomic(is_write, access_type);
+        else
+          memory_coalescing_arch(is_write, access_type);
+      } else
+        abort();
+
+      break;
+
+    default:
       abort();
-
-    break;
-
-  default:
-    abort();
   }
 
   if (cache_block_size) {
     assert(m_accessq.empty());
     mem_access_byte_mask_t byte_mask;
     std::map<new_addr_type, active_mask_t>
-        accesses; // block address -> set of thread offsets in warp
+        accesses;  // block address -> set of thread offsets in warp
     std::map<new_addr_type, active_mask_t>::iterator a;
     for (unsigned thread = 0; thread < m_config->warp_size; thread++) {
-      if (!active(thread))
-        continue;
+      if (!active(thread)) continue;
       new_addr_type addr = m_per_scalar_thread[thread].memreqaddr[0];
-      unsigned block_address = line_size_based_tag_func(addr, cache_block_size);
+      new_addr_type block_address =
+          line_size_based_tag_func(addr, cache_block_size);
       accesses[block_address].set(thread);
       unsigned idx = addr - block_address;
-      for (unsigned i = 0; i < data_size; i++)
-        byte_mask.set(idx + i);
+      for (unsigned i = 0; i < data_size; i++) byte_mask.set(idx + i);
     }
     for (a = accesses.begin(); a != accesses.end(); ++a)
-      m_accessq.push_back(mem_access_t(access_type, a->first, cache_block_size,
-                                       is_write, a->second, byte_mask));
+      m_accessq.push_back(mem_access_t(
+          access_type, a->first, cache_block_size, is_write, a->second,
+          byte_mask, mem_access_sector_mask_t(), m_config->gpgpu_ctx));
   }
 
   if (space.get_type() == global_space) {
-    ptx_file_line_stats_add_uncoalesced_gmem(pc, m_accessq.size() -
-                                                     starting_queue_size);
+    m_config->gpgpu_ctx->stats->ptx_file_line_stats_add_uncoalesced_gmem(
+        pc, m_accessq.size() - starting_queue_size);
   }
   m_mem_accesses_created = true;
 }
 
-void warp_inst_t::memory_coalescing_arch_13(bool is_write,
-                                            mem_access_type access_type) {
+void warp_inst_t::memory_coalescing_arch(bool is_write,
+                                         mem_access_type access_type) {
   // see the CUDA manual where it discusses coalescing rules before reading this
   unsigned segment_size = 0;
   unsigned warp_parts = m_config->mem_warp_parts;
+  bool sector_segment_size = false;
+
+  if (m_config->gpgpu_coalesce_arch >= 20 &&
+      m_config->gpgpu_coalesce_arch < 39) {
+    // Fermi and Kepler, L1 is normal and L2 is sector
+    if (m_config->gmem_skip_L1D || cache_op == CACHE_GLOBAL)
+      sector_segment_size = true;
+    else
+      sector_segment_size = false;
+  } else if (m_config->gpgpu_coalesce_arch >= 40) {
+    // Maxwell, Pascal and Volta, L1 and L2 are sectors
+    // all requests should be 32 bytes
+    sector_segment_size = true;
+  }
+
   switch (data_size) {
-  case 1:
-    segment_size = 32;
-    break;
-  case 2:
-    segment_size = 64;
-    break;
-  case 4:
-  case 8:
-  case 16:
-    segment_size = 128;
-    break;
+    case 1:
+      segment_size = 32;
+      break;
+    case 2:
+      segment_size = sector_segment_size ? 32 : 64;
+      break;
+    case 4:
+    case 8:
+    case 16:
+      segment_size = sector_segment_size ? 32 : 128;
+      break;
   }
   unsigned subwarp_size = m_config->warp_size / warp_parts;
 
@@ -428,8 +559,7 @@ void warp_inst_t::memory_coalescing_arch_13(bool is_write,
     // step 1: find all transactions generated by this subwarp
     for (unsigned thread = subwarp * subwarp_size;
          thread < subwarp_size * (subwarp + 1); thread++) {
-      if (!active(thread))
-        continue;
+      if (!active(thread)) continue;
 
       unsigned data_size_coales = data_size;
       unsigned num_accesses = 1;
@@ -446,23 +576,45 @@ void warp_inst_t::memory_coalescing_arch_13(bool is_write,
 
       assert(num_accesses <= MAX_ACCESSES_PER_INSN_PER_THREAD);
 
-      for (unsigned access = 0; access < num_accesses; access++) {
+      //            for(unsigned access=0; access<num_accesses; access++) {
+      for (unsigned access = 0;
+           (access < MAX_ACCESSES_PER_INSN_PER_THREAD) &&
+           (m_per_scalar_thread[thread].memreqaddr[access] != 0);
+           access++) {
         new_addr_type addr = m_per_scalar_thread[thread].memreqaddr[access];
-        unsigned block_address = line_size_based_tag_func(addr, segment_size);
+        new_addr_type block_address =
+            line_size_based_tag_func(addr, segment_size);
         unsigned chunk =
-            (addr & 127) / 32; // which 32-byte chunk within in a 128-byte chunk
-                               // does this thread access?
+            (addr & 127) / 32;  // which 32-byte chunk within in a 128-byte
+                                // chunk does this thread access?
         transaction_info &info = subwarp_transactions[block_address];
 
         // can only write to one segment
-        assert(block_address == line_size_based_tag_func(
-                                    addr + data_size_coales - 1, segment_size));
+        // it seems like in trace driven, a thread can write to more than one
+        // segment assert(block_address ==
+        // line_size_based_tag_func(addr+data_size_coales-1,segment_size));
 
         info.chunks.set(chunk);
         info.active.set(thread);
         unsigned idx = (addr & 127);
         for (unsigned i = 0; i < data_size_coales; i++)
-          info.bytes.set(idx + i);
+          if ((idx + i) < MAX_MEMORY_ACCESS_SIZE) info.bytes.set(idx + i);
+
+        // it seems like in trace driven, a thread can write to more than one
+        // segment handle this special case
+        if (block_address != line_size_based_tag_func(
+                                 addr + data_size_coales - 1, segment_size)) {
+          addr = addr + data_size_coales - 1;
+          new_addr_type block_address =
+              line_size_based_tag_func(addr, segment_size);
+          unsigned chunk = (addr & 127) / 32;
+          transaction_info &info = subwarp_transactions[block_address];
+          info.chunks.set(chunk);
+          info.active.set(thread);
+          unsigned idx = (addr & 127);
+          for (unsigned i = 0; i < data_size_coales; i++)
+            if ((idx + i) < MAX_MEMORY_ACCESS_SIZE) info.bytes.set(idx + i);
+        }
       }
     }
 
@@ -473,51 +625,65 @@ void warp_inst_t::memory_coalescing_arch_13(bool is_write,
       new_addr_type addr = t->first;
       const transaction_info &info = t->second;
 
-      memory_coalescing_arch_13_reduce_and_send(is_write, access_type, info,
-                                                addr, segment_size);
+      memory_coalescing_arch_reduce_and_send(is_write, access_type, info, addr,
+                                             segment_size);
     }
   }
 }
 
-void warp_inst_t::memory_coalescing_arch_13_atomic(
-    bool is_write, mem_access_type access_type) {
-
+void warp_inst_t::memory_coalescing_arch_atomic(bool is_write,
+                                                mem_access_type access_type) {
   assert(space.get_type() ==
-         global_space); // Atomics allowed only for global memory
+         global_space);  // Atomics allowed only for global memory
 
   // see the CUDA manual where it discusses coalescing rules before reading this
   unsigned segment_size = 0;
-  unsigned warp_parts = 2;
+  unsigned warp_parts = m_config->mem_warp_parts;
+  bool sector_segment_size = false;
+
+  if (m_config->gpgpu_coalesce_arch >= 20 &&
+      m_config->gpgpu_coalesce_arch < 39) {
+    // Fermi and Kepler, L1 is normal and L2 is sector
+    if (m_config->gmem_skip_L1D || cache_op == CACHE_GLOBAL)
+      sector_segment_size = true;
+    else
+      sector_segment_size = false;
+  } else if (m_config->gpgpu_coalesce_arch >= 40) {
+    // Maxwell, Pascal and Volta, L1 and L2 are sectors
+    // all requests should be 32 bytes
+    sector_segment_size = true;
+  }
+
   switch (data_size) {
-  case 1:
-    segment_size = 32;
-    break;
-  case 2:
-    segment_size = 64;
-    break;
-  case 4:
-  case 8:
-  case 16:
-    segment_size = 128;
-    break;
+    case 1:
+      segment_size = 32;
+      break;
+    case 2:
+      segment_size = sector_segment_size ? 32 : 64;
+      break;
+    case 4:
+    case 8:
+    case 16:
+      segment_size = sector_segment_size ? 32 : 128;
+      break;
   }
   unsigned subwarp_size = m_config->warp_size / warp_parts;
 
   for (unsigned subwarp = 0; subwarp < warp_parts; subwarp++) {
-    std::map<new_addr_type, std::list<transaction_info>>
-        subwarp_transactions; // each block addr maps to a list of transactions
+    std::map<new_addr_type, std::list<transaction_info> >
+        subwarp_transactions;  // each block addr maps to a list of transactions
 
     // step 1: find all transactions generated by this subwarp
     for (unsigned thread = subwarp * subwarp_size;
          thread < subwarp_size * (subwarp + 1); thread++) {
-      if (!active(thread))
-        continue;
+      if (!active(thread)) continue;
 
       new_addr_type addr = m_per_scalar_thread[thread].memreqaddr[0];
-      unsigned block_address = line_size_based_tag_func(addr, segment_size);
+      new_addr_type block_address =
+          line_size_based_tag_func(addr, segment_size);
       unsigned chunk =
-          (addr & 127) / 32; // which 32-byte chunk within in a 128-byte chunk
-                             // does this thread access?
+          (addr & 127) / 32;  // which 32-byte chunk within in a 128-byte chunk
+                              // does this thread access?
 
       // can only write to one segment
       assert(block_address ==
@@ -553,7 +719,7 @@ void warp_inst_t::memory_coalescing_arch_13_atomic(
     }
 
     // step 2: reduce each transaction size, if possible
-    std::map<new_addr_type, std::list<transaction_info>>::iterator t_list;
+    std::map<new_addr_type, std::list<transaction_info> >::iterator t_list;
     for (t_list = subwarp_transactions.begin();
          t_list != subwarp_transactions.end(); t_list++) {
       // For each block addr
@@ -564,22 +730,22 @@ void warp_inst_t::memory_coalescing_arch_13_atomic(
       for (t = transaction_list.begin(); t != transaction_list.end(); t++) {
         // For each transaction
         const transaction_info &info = *t;
-        memory_coalescing_arch_13_reduce_and_send(is_write, access_type, info,
-                                                  addr, segment_size);
+        memory_coalescing_arch_reduce_and_send(is_write, access_type, info,
+                                               addr, segment_size);
       }
     }
   }
 }
 
-void warp_inst_t::memory_coalescing_arch_13_reduce_and_send(
+void warp_inst_t::memory_coalescing_arch_reduce_and_send(
     bool is_write, mem_access_type access_type, const transaction_info &info,
     new_addr_type addr, unsigned segment_size) {
   assert((addr & (segment_size - 1)) == 0);
 
   const std::bitset<4> &q = info.chunks;
   assert(q.count() >= 1);
-  std::bitset<2> h; // halves (used to check if 64 byte segment can be
-                    // compressed into a single 32 byte segment)
+  std::bitset<2> h;  // halves (used to check if 64 byte segment can be
+                     // compressed into a single 32 byte segment)
 
   unsigned size = segment_size;
   if (segment_size == 128) {
@@ -588,34 +754,26 @@ void warp_inst_t::memory_coalescing_arch_13_reduce_and_send(
     if (lower_half_used && !upper_half_used) {
       // only lower 64 bytes used
       size = 64;
-      if (q[0])
-        h.set(0);
-      if (q[1])
-        h.set(1);
+      if (q[0]) h.set(0);
+      if (q[1]) h.set(1);
     } else if ((!lower_half_used) && upper_half_used) {
       // only upper 64 bytes used
       addr = addr + 64;
       size = 64;
-      if (q[2])
-        h.set(0);
-      if (q[3])
-        h.set(1);
+      if (q[2]) h.set(0);
+      if (q[3]) h.set(1);
     } else {
       assert(lower_half_used && upper_half_used);
     }
   } else if (segment_size == 64) {
     // need to set halves
     if ((addr % 128) == 0) {
-      if (q[0])
-        h.set(0);
-      if (q[1])
-        h.set(1);
+      if (q[0]) h.set(0);
+      if (q[1]) h.set(1);
     } else {
       assert((addr % 128) == 64);
-      if (q[2])
-        h.set(0);
-      if (q[3])
-        h.set(1);
+      if (q[2]) h.set(0);
+      if (q[3]) h.set(1);
     }
   }
   if (size == 64) {
@@ -630,24 +788,49 @@ void warp_inst_t::memory_coalescing_arch_13_reduce_and_send(
       assert(lower_half_used && upper_half_used);
     }
   }
-  m_accessq.push_back(
-      mem_access_t(access_type, addr, size, is_write, info.active, info.bytes));
+  m_accessq.push_back(mem_access_t(access_type, addr, size, is_write,
+                                   info.active, info.bytes, info.chunks,
+                                   m_config->gpgpu_ctx));
 }
 
 void warp_inst_t::completed(unsigned long long cycle) const {
   unsigned long long latency = cycle - issue_cycle;
-  assert(latency <= cycle); // underflow detection
-  ptx_file_line_stats_add_latency(pc, latency * active_count());
+  assert(latency <= cycle);  // underflow detection
+  m_config->gpgpu_ctx->stats->ptx_file_line_stats_add_latency(
+      pc, latency * active_count());
 }
-
-// Jin: CDP support
-bool g_cdp_enabled;
-unsigned g_kernel_launch_latency;
-
-unsigned kernel_info_t::m_next_uid = 1;
 
 kernel_info_t::kernel_info_t(dim3 gridDim, dim3 blockDim,
                              class function_info *entry,
+                             unsigned long long streamID) {
+  m_kernel_entry = entry;
+  m_grid_dim = gridDim;
+  m_block_dim = blockDim;
+  m_next_cta.x = 0;
+  m_next_cta.y = 0;
+  m_next_cta.z = 0;
+  m_next_tid = m_next_cta;
+  m_num_cores_running = 0;
+  m_uid = (entry->gpgpu_ctx->kernel_info_m_next_uid)++;
+  m_streamID = streamID;
+  m_param_mem = new memory_space_impl<4096>("param", 64 * 1024);
+
+  // Jin: parent and child kernel management for CDP
+  m_parent_kernel = NULL;
+
+  // Jin: launch latency management
+  m_launch_latency = entry->gpgpu_ctx->device_runtime->g_kernel_launch_latency;
+
+  m_kernel_TB_latency =
+      entry->gpgpu_ctx->device_runtime->g_kernel_launch_latency +
+      num_blocks() * entry->gpgpu_ctx->device_runtime->g_TB_launch_latency;
+
+  cache_config_set = false;
+}
+
+kernel_info_t::kernel_info_t(dim3 gridDim, dim3 blockDim,
+                             class function_info *entry,
+                             unsigned long long streamID,
                              const gpgpu_sim_config &gpu_config) {
   m_kernel_entry = entry;
   m_grid_dim = gridDim;
@@ -657,7 +840,8 @@ kernel_info_t::kernel_info_t(dim3 gridDim, dim3 blockDim,
   m_next_cta.z = 0;
   m_next_tid = m_next_cta;
   m_num_cores_running = 0;
-  m_uid = m_next_uid++;
+  m_uid = (entry->gpgpu_ctx->kernel_info_m_next_uid)++;
+  m_streamID = streamID;
   if (gpu_config.page_size == 4096) {
     m_param_mem = new memory_space_impl<4096>("param", 64 * 1024);
   } else {
@@ -668,7 +852,52 @@ kernel_info_t::kernel_info_t(dim3 gridDim, dim3 blockDim,
   m_parent_kernel = NULL;
 
   // Jin: launch latency management
-  m_launch_latency = g_kernel_launch_latency;
+  m_launch_latency = entry->gpgpu_ctx->device_runtime->g_kernel_launch_latency;
+
+  m_kernel_TB_latency =
+      entry->gpgpu_ctx->device_runtime->g_kernel_launch_latency +
+      num_blocks() * entry->gpgpu_ctx->device_runtime->g_TB_launch_latency;
+
+  cache_config_set = false;
+}
+
+/*A snapshot of the texture mappings needs to be stored in the kernel's info as
+kernels should use the texture bindings seen at the time of launch and textures
+ can be bound/unbound asynchronously with respect to streams. */
+kernel_info_t::kernel_info_t(
+    dim3 gridDim, dim3 blockDim, class function_info *entry,
+    std::map<std::string, const struct cudaArray *> nameToCudaArray,
+    std::map<std::string, const struct textureInfo *> nameToTextureInfo,
+    const gpgpu_sim_config &gpu_config) {
+  m_kernel_entry = entry;
+  m_grid_dim = gridDim;
+  m_block_dim = blockDim;
+  m_next_cta.x = 0;
+  m_next_cta.y = 0;
+  m_next_cta.z = 0;
+  m_next_tid = m_next_cta;
+  m_num_cores_running = 0;
+  m_uid = (entry->gpgpu_ctx->kernel_info_m_next_uid)++;
+  //m_param_mem = new memory_space_impl<8192>("param", 64 * 1024);
+  if (gpu_config.page_size == 4096) {
+    m_param_mem = new memory_space_impl<4096>("param", 64 * 1024);
+  } else {
+    m_param_mem = new memory_space_impl<2 * 1024 * 1024>("param", 64 * 1024);
+  }
+  
+  // Jin: parent and child kernel management for CDP
+  m_parent_kernel = NULL;
+
+  // Jin: launch latency management
+  m_launch_latency = entry->gpgpu_ctx->device_runtime->g_kernel_launch_latency;
+
+  m_kernel_TB_latency =
+      entry->gpgpu_ctx->device_runtime->g_kernel_launch_latency +
+      num_blocks() * entry->gpgpu_ctx->device_runtime->g_TB_launch_latency;
+
+  cache_config_set = false;
+  m_NameToCudaArray = nameToCudaArray;
+  m_NameToTextureInfo = nameToTextureInfo;
 }
 
 kernel_info_t::~kernel_info_t() {
@@ -706,28 +935,27 @@ bool kernel_info_t::is_finished() {
 }
 
 bool kernel_info_t::children_all_finished() {
-  if (!m_child_kernels.empty())
-    return false;
+  if (!m_child_kernels.empty()) return false;
 
   return true;
 }
 
 void kernel_info_t::notify_parent_finished() {
   if (m_parent_kernel) {
-    extern unsigned long long g_total_param_size;
-    g_total_param_size -=
+    m_kernel_entry->gpgpu_ctx->device_runtime->g_total_param_size -=
         ((m_kernel_entry->get_args_aligned_size() + 255) / 256 * 256);
     m_parent_kernel->remove_child(this);
-    g_stream_manager->register_finished_kernel(m_parent_kernel->get_uid());
+    m_kernel_entry->gpgpu_ctx->the_gpgpusim->g_stream_manager
+        ->register_finished_kernel(m_parent_kernel->get_uid());
   }
 }
 
 CUstream_st *kernel_info_t::create_stream_cta(dim3 ctaid) {
   assert(get_default_stream_cta(ctaid));
   CUstream_st *stream = new CUstream_st();
-  g_stream_manager->add_stream(stream);
+  m_kernel_entry->gpgpu_ctx->the_gpgpusim->g_stream_manager->add_stream(stream);
   assert(m_cta_streams.find(ctaid) != m_cta_streams.end());
-  assert(m_cta_streams[ctaid].size() >= 1); // must have default stream
+  assert(m_cta_streams[ctaid].size() >= 1);  // must have default stream
   m_cta_streams[ctaid].push_back(stream);
 
   return stream;
@@ -736,20 +964,20 @@ CUstream_st *kernel_info_t::create_stream_cta(dim3 ctaid) {
 CUstream_st *kernel_info_t::get_default_stream_cta(dim3 ctaid) {
   if (m_cta_streams.find(ctaid) != m_cta_streams.end()) {
     assert(m_cta_streams[ctaid].size() >=
-           1); // already created, must have default stream
+           1);  // already created, must have default stream
     return *(m_cta_streams[ctaid].begin());
   } else {
     m_cta_streams[ctaid] = std::list<CUstream_st *>();
     CUstream_st *stream = new CUstream_st();
-    g_stream_manager->add_stream(stream);
+    m_kernel_entry->gpgpu_ctx->the_gpgpusim->g_stream_manager->add_stream(
+        stream);
     m_cta_streams[ctaid].push_back(stream);
     return stream;
   }
 }
 
 bool kernel_info_t::cta_has_stream(dim3 ctaid, CUstream_st *stream) {
-  if (m_cta_streams.find(ctaid) == m_cta_streams.end())
-    return false;
+  if (m_cta_streams.find(ctaid) == m_cta_streams.end()) return false;
 
   std::list<CUstream_st *> &stream_list = m_cta_streams[ctaid];
   if (std::find(stream_list.begin(), stream_list.end(), stream) ==
@@ -774,16 +1002,18 @@ void kernel_info_t::destroy_cta_streams() {
   for (auto s = m_cta_streams.begin(); s != m_cta_streams.end(); s++) {
     stream_size += s->second.size();
     for (auto ss = s->second.begin(); ss != s->second.end(); ss++)
-      g_stream_manager->destroy_stream(*ss);
+      m_kernel_entry->gpgpu_ctx->the_gpgpusim->g_stream_manager->destroy_stream(
+          *ss);
     s->second.clear();
   }
   printf("size %lu\n", stream_size);
   m_cta_streams.clear();
 }
 
-simt_stack::simt_stack(unsigned wid, unsigned warpSize) {
+simt_stack::simt_stack(unsigned wid, unsigned warpSize, class gpgpu_sim *gpu) {
   m_warp_id = wid;
   m_warp_size = warpSize;
+  m_gpu = gpu;
   reset();
 }
 
@@ -797,6 +1027,44 @@ void simt_stack::launch(address_type start_pc, const simt_mask_t &active_mask) {
   new_stack_entry.m_active_mask = active_mask;
   new_stack_entry.m_type = STACK_ENTRY_TYPE_NORMAL;
   m_stack.push_back(new_stack_entry);
+}
+
+void simt_stack::resume(char *fname) {
+  reset();
+
+  FILE *fp2 = fopen(fname, "r");
+  assert(fp2 != NULL);
+
+  char line[200]; /* or other suitable maximum line size */
+
+  while (fgets(line, sizeof line, fp2) != NULL) /* read a line */
+  {
+    simt_stack_entry new_stack_entry;
+    char *pch;
+    pch = strtok(line, " ");
+    for (unsigned j = 0; j < m_warp_size; j++) {
+      if (pch[0] == '1')
+        new_stack_entry.m_active_mask.set(j);
+      else
+        new_stack_entry.m_active_mask.reset(j);
+      pch = strtok(NULL, " ");
+    }
+
+    new_stack_entry.m_pc = atoi(pch);
+    pch = strtok(NULL, " ");
+    new_stack_entry.m_calldepth = atoi(pch);
+    pch = strtok(NULL, " ");
+    new_stack_entry.m_recvg_pc = atoi(pch);
+    pch = strtok(NULL, " ");
+    new_stack_entry.m_branch_div_cycle = atoi(pch);
+    pch = strtok(NULL, " ");
+    if (pch[0] == '0')
+      new_stack_entry.m_type = STACK_ENTRY_TYPE_NORMAL;
+    else
+      new_stack_entry.m_type = STACK_ENTRY_TYPE_CALL;
+    m_stack.push_back(new_stack_entry);
+  }
+  fclose(fp2);
 }
 
 const simt_mask_t &simt_stack::get_active_mask() const {
@@ -825,13 +1093,13 @@ void simt_stack::print(FILE *fout) const {
     }
     for (unsigned j = 0; j < m_warp_size; j++)
       fprintf(fout, "%c", (stack_entry.m_active_mask.test(j) ? '1' : '0'));
-    fprintf(fout, " pc: 0x%03x", stack_entry.m_pc);
+    fprintf(fout, " pc: 0x%03llx", stack_entry.m_pc);
     if (stack_entry.m_recvg_pc == (unsigned)-1) {
       fprintf(fout, " rp: ---- tp: %s cd: %2u ",
               (stack_entry.m_type == STACK_ENTRY_TYPE_CALL ? "C" : "N"),
               stack_entry.m_calldepth);
     } else {
-      fprintf(fout, " rp: %4u tp: %s cd: %2u ", stack_entry.m_recvg_pc,
+      fprintf(fout, " rp: %4llu tp: %s cd: %2u ", stack_entry.m_recvg_pc,
               (stack_entry.m_type == STACK_ENTRY_TYPE_CALL ? "C" : "N"),
               stack_entry.m_calldepth);
     }
@@ -840,8 +1108,21 @@ void simt_stack::print(FILE *fout) const {
     } else {
       fprintf(fout, " ");
     }
-    ptx_print_insn(stack_entry.m_pc, fout);
+    m_gpu->gpgpu_ctx->func_sim->ptx_print_insn(stack_entry.m_pc, fout);
     fprintf(fout, "\n");
+  }
+}
+
+void simt_stack::print_checkpoint(FILE *fout) const {
+  for (unsigned k = 0; k < m_stack.size(); k++) {
+    simt_stack_entry stack_entry = m_stack[k];
+
+    for (unsigned j = 0; j < m_warp_size; j++)
+      fprintf(fout, "%c ", (stack_entry.m_active_mask.test(j) ? '1' : '0'));
+    fprintf(fout, "%llu %d %llu %lld %d ", stack_entry.m_pc,
+            stack_entry.m_calldepth, stack_entry.m_recvg_pc,
+            stack_entry.m_branch_div_cycle, stack_entry.m_type);
+    fprintf(fout, "%d %d\n", m_warp_id, m_warp_size);
   }
 }
 
@@ -855,7 +1136,7 @@ void simt_stack::update(simt_mask_t &thread_done, addr_vector_t &next_pc,
   simt_mask_t top_active_mask = m_stack.back().m_active_mask;
   address_type top_recvg_pc = m_stack.back().m_recvg_pc;
   address_type top_pc =
-      m_stack.back().m_pc; // the pc of the instruction just executed
+      m_stack.back().m_pc;  // the pc of the instruction just executed
   stack_entry_type top_type = m_stack.back().m_type;
   assert(top_pc == next_inst_pc);
   assert(top_active_mask.any());
@@ -867,15 +1148,14 @@ void simt_stack::update(simt_mask_t &thread_done, addr_vector_t &next_pc,
 
   std::map<address_type, simt_mask_t> divergent_paths;
   while (top_active_mask.any()) {
-
     // extract a group of threads with the same next PC among the active threads
     // in the warp
     address_type tmp_next_pc = null_pc;
     simt_mask_t tmp_active_mask;
     for (int i = m_warp_size - 1; i >= 0; i--) {
-      if (top_active_mask.test(i)) { // is this thread active?
+      if (top_active_mask.test(i)) {  // is this thread active?
         if (thread_done.test(i)) {
-          top_active_mask.reset(i); // remove completed thread from active mask
+          top_active_mask.reset(i);  // remove completed thread from active mask
         } else if (tmp_next_pc == null_pc) {
           tmp_next_pc = next_pc[i];
           tmp_active_mask.set(i);
@@ -888,7 +1168,7 @@ void simt_stack::update(simt_mask_t &thread_done, addr_vector_t &next_pc,
     }
 
     if (tmp_next_pc == null_pc) {
-      assert(!top_active_mask.any()); // all threads done
+      assert(!top_active_mask.any());  // all threads done
       continue;
     }
 
@@ -924,7 +1204,8 @@ void simt_stack::update(simt_mask_t &thread_done, addr_vector_t &next_pc,
       simt_stack_entry new_stack_entry;
       new_stack_entry.m_pc = tmp_next_pc;
       new_stack_entry.m_active_mask = tmp_active_mask;
-      new_stack_entry.m_branch_div_cycle = gpu_sim_cycle + gpu_tot_sim_cycle;
+      new_stack_entry.m_branch_div_cycle =
+          m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle;
       new_stack_entry.m_type = STACK_ENTRY_TYPE_CALL;
       m_stack.push_back(new_stack_entry);
       return;
@@ -934,8 +1215,8 @@ void simt_stack::update(simt_mask_t &thread_done, addr_vector_t &next_pc,
       m_stack.pop_back();
 
       assert(m_stack.size() > 0);
-      m_stack.back().m_pc = tmp_next_pc; // set the PC of the stack top entry to
-                                         // return PC from  the call stack;
+      m_stack.back().m_pc = tmp_next_pc;  // set the PC of the stack top entry
+                                          // to return PC from  the call stack;
       // Check if the New top of the stack is reconverging
       if (tmp_next_pc == m_stack.back().m_recvg_pc &&
           m_stack.back().m_type != STACK_ENTRY_TYPE_CALL) {
@@ -960,15 +1241,15 @@ void simt_stack::update(simt_mask_t &thread_done, addr_vector_t &next_pc,
       new_recvg_pc = recvg_pc;
       if (new_recvg_pc != top_recvg_pc) {
         m_stack.back().m_pc = new_recvg_pc;
-        m_stack.back().m_branch_div_cycle = gpu_sim_cycle + gpu_tot_sim_cycle;
+        m_stack.back().m_branch_div_cycle =
+            m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle;
 
         m_stack.push_back(simt_stack_entry());
       }
     }
 
     // discard the new entry if its PC matches with reconvergence PC
-    if (warp_diverged && tmp_next_pc == new_recvg_pc)
-      continue;
+    if (warp_diverged && tmp_next_pc == new_recvg_pc) continue;
 
     // update the current top of pdom stack
     m_stack.back().m_pc = tmp_next_pc;
@@ -986,15 +1267,14 @@ void simt_stack::update(simt_mask_t &thread_done, addr_vector_t &next_pc,
   m_stack.pop_back();
 
   if (warp_diverged) {
-    ptx_file_line_stats_add_warp_divergence(top_pc, 1);
+    m_gpu->gpgpu_ctx->stats->ptx_file_line_stats_add_warp_divergence(top_pc, 1);
   }
 }
 
 void core_t::execute_warp_inst_t(warp_inst_t &inst, unsigned warpId) {
   for (unsigned t = 0; t < m_warp_size; t++) {
     if (inst.active(t)) {
-      if (warpId == (unsigned(-1)))
-        warpId = inst.warp_id();
+      if (warpId == (unsigned(-1))) warpId = inst.warp_id();
       unsigned tid = m_warp_size * warpId + t;
       m_thread[tid]->ptx_exec_inst(inst, t);
 
@@ -1031,15 +1311,14 @@ void core_t::updateSIMTStack(unsigned warpId, warp_inst_t *inst) {
 warp_inst_t core_t::getExecuteWarp(unsigned warpId) {
   unsigned pc, rpc;
   m_simt_stack[warpId]->get_pdom_stack_top_info(&pc, &rpc);
-  warp_inst_t wi = *ptx_fetch_inst(pc);
+  warp_inst_t wi = *(m_gpu->gpgpu_ctx->ptx_fetch_inst(pc));
   wi.set_active(m_simt_stack[warpId]->get_active_mask());
   return wi;
 }
 
 void core_t::deleteSIMTStack() {
   if (m_simt_stack) {
-    for (unsigned i = 0; i < m_warp_count; ++i)
-      delete m_simt_stack[i];
+    for (unsigned i = 0; i < m_warp_count; ++i) delete m_simt_stack[i];
     delete[] m_simt_stack;
     m_simt_stack = NULL;
   }
@@ -1048,7 +1327,7 @@ void core_t::deleteSIMTStack() {
 void core_t::initilizeSIMTStack(unsigned warp_count, unsigned warp_size) {
   m_simt_stack = new simt_stack *[warp_count];
   for (unsigned i = 0; i < warp_count; ++i)
-    m_simt_stack[i] = new simt_stack(i, warp_size);
+    m_simt_stack[i] = new simt_stack(i, warp_size, m_gpu);
   m_warp_size = warp_size;
   m_warp_count = warp_count;
 }

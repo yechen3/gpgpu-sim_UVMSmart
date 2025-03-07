@@ -34,7 +34,7 @@
 #include <string>
 
 class brk_pt {
-public:
+ public:
   brk_pt() { m_valid = false; }
   brk_pt(const char *fileline, unsigned uid) {
     m_valid = true;
@@ -54,10 +54,8 @@ public:
   bool is_valid() const { return m_valid; }
   bool is_watchpoint() const { return m_watch; }
   bool is_equal(const std::string &fileline, unsigned uid) const {
-    if (m_watch)
-      return false;
-    if ((m_thread_uid != (unsigned)-1) && (uid != m_thread_uid))
-      return false;
+    if (m_watch) return false;
+    if ((m_thread_uid != (unsigned)-1) && (uid != m_thread_uid)) return false;
     return m_fileline == fileline;
   }
   std::string location() const {
@@ -68,7 +66,7 @@ public:
 
   unsigned set_value(unsigned val) { return m_value = val; }
 
-private:
+ private:
   bool m_valid;
   bool m_watch;
 
@@ -81,12 +79,8 @@ private:
   unsigned m_value;
 };
 
-extern int gpgpu_ptx_instruction_classification;
-
 class ptx_thread_info;
 class ptx_instruction;
-bool thread_at_brkpt(ptx_thread_info *thd_info, const struct brk_pt &b);
-void hit_watchpoint(unsigned watchpoint_num, ptx_thread_info *thd,
-                    const ptx_instruction *pI);
+bool thread_at_brkpt(ptx_thread_info *thd_info, const class brk_pt &b);
 
 #endif

@@ -32,15 +32,12 @@
 #ifndef __TRACE_H__
 #define __TRACE_H__
 
-extern unsigned long long gpu_sim_cycle;
-extern unsigned long long gpu_tot_sim_cycle;
-
 namespace Trace {
 
 #define TS_TUP_BEGIN(X) enum X {
 #define TS_TUP(X) X
-#define TS_TUP_END(X)                                                          \
-  }                                                                            \
+#define TS_TUP_END(X) \
+  }                   \
   ;
 #include "trace_streams.tup"
 #undef TS_TUP_BEGIN
@@ -50,26 +47,26 @@ namespace Trace {
 extern bool enabled;
 extern int sampling_core;
 extern int sampling_memory_partition;
-extern const char *trace_streams_str[];
+extern const char* trace_streams_str[];
 extern bool trace_streams_enabled[NUM_TRACE_STREAMS];
-extern const char *config_str;
+extern const char* config_str;
 
 void init();
 
-} // namespace Trace
+}  // namespace Trace
 
 #if TRACING_ON
 
 #define SIM_PRINT_STR "GPGPU-Sim Cycle %llu: %s - "
 #define DTRACE(x) ((Trace::trace_streams_enabled[Trace::x]) && Trace::enabled)
-#define DPRINTF(x, ...)                                                        \
-//  do {                                                                         \
-//    if (DTRACE(x)) {                                                           \
-//      printf(SIM_PRINT_STR, gpu_sim_cycle + gpu_tot_sim_cycle,                 \
-//             Trace::trace_streams_str[Trace::x]);                              \
-//      printf(__VA_ARGS__);                                                     \
-//    }                                                                          \
-//  } while (0)
+#define DPRINTF(x, ...)                                                      \
+  do {                                                                       \
+    if (DTRACE(x)) {                                                         \
+      printf(SIM_PRINT_STR, m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle, \
+             Trace::trace_streams_str[Trace::x]);                            \
+      printf(__VA_ARGS__);                                                   \
+    }                                                                        \
+  } while (0)
 
 #define DPRINTFG(x, ...)                                       \
   do {                                                         \
@@ -83,8 +80,11 @@ void init();
 #else
 
 #define DTRACE(x) (false)
-#define DPRINTF(x, ...)                                                        \
-  do {                                                                         \
+#define DPRINTF(x, ...) \
+  do {                  \
+  } while (0)
+#define DPRINTFG(x, ...) \
+  do {                   \
   } while (0)
 
 #endif

@@ -45,10 +45,9 @@
 static void time_vector_print_interval2gzfile(gzFile outfile);
 
 void gpgpu_sim::visualizer_printstat() {
-  gzFile visualizer_file = NULL; // gzFile is basically a pointer to a struct,
-                                 // so it is fine to initialize it as NULL
-  if (!m_config.g_visualizer_enabled)
-    return;
+  gzFile visualizer_file = NULL;  // gzFile is basically a pointer to a struct,
+                                  // so it is fine to initialize it as NULL
+  if (!m_config.g_visualizer_enabled) return;
 
   // clean the content of the visualizer log if it is the first time, otherwise
   // attach at the end
@@ -111,15 +110,15 @@ void gpgpu_sim::visualizer_printstat() {
   */
 }
 
-#include "../gpgpu-sim/shader.h"
 #include <iostream>
 #include <list>
 #include <map>
 #include <vector>
+#include "../gpgpu-sim/shader.h"
 class my_time_vector {
-private:
-  std::map<unsigned int, std::vector<long int>> ld_time_map;
-  std::map<unsigned int, std::vector<long int>> st_time_map;
+ private:
+  std::map<unsigned int, std::vector<long int> > ld_time_map;
+  std::map<unsigned int, std::vector<long int> > st_time_map;
   unsigned ld_vector_size;
   unsigned st_vector_size;
   std::vector<double> ld_time_dist;
@@ -130,7 +129,7 @@ private:
   int overal_ld_count;
   int overal_st_count;
 
-public:
+ public:
   my_time_vector(int ld_size, int st_size) {
     ld_vector_size = ld_size;
     st_vector_size = st_size;
@@ -182,14 +181,14 @@ public:
     }
   }
 
-private:
+ private:
   void calculate_ld_dist(void) {
     unsigned i, first;
     long int last_update, diff;
     int finished_count = 0;
     ld_time_dist.clear();
     ld_time_dist.resize(ld_vector_size);
-    std::map<unsigned int, std::vector<long int>>::iterator iter, iter_temp;
+    std::map<unsigned int, std::vector<long int> >::iterator iter, iter_temp;
     iter = ld_time_map.begin();
     while (iter != ld_time_map.end()) {
       last_update = 0;
@@ -236,7 +235,7 @@ private:
     int finished_count = 0;
     st_time_dist.clear();
     st_time_dist.resize(st_vector_size);
-    std::map<unsigned int, std::vector<long int>>::iterator iter, iter_temp;
+    std::map<unsigned int, std::vector<long int> >::iterator iter, iter_temp;
     iter = st_time_map.begin();
     while (iter != st_time_map.end()) {
       last_update = 0;
@@ -277,14 +276,14 @@ private:
     }
   }
 
-public:
+ public:
   void clear_time_map_vectors(void) {
     ld_time_map.clear();
     st_time_map.clear();
   }
   void print_all_ld(void) {
     unsigned i;
-    std::map<unsigned int, std::vector<long int>>::iterator iter;
+    std::map<unsigned int, std::vector<long int> >::iterator iter;
     for (iter = ld_time_map.begin(); iter != ld_time_map.end(); ++iter) {
       std::cout << "ld_uid" << iter->first;
       for (i = 0; i < ld_vector_size; i++) {
@@ -296,7 +295,7 @@ public:
 
   void print_all_st(void) {
     unsigned i;
-    std::map<unsigned int, std::vector<long int>>::iterator iter;
+    std::map<unsigned int, std::vector<long int> >::iterator iter;
 
     for (iter = st_time_map.begin(); iter != st_time_map.end(); ++iter) {
       std::cout << "st_uid" << iter->first;
@@ -325,7 +324,7 @@ public:
     }
     std::cout << std::endl;
   }
-  void print_to_file(FILE *outfile) {
+  void print_to_file(FILE* outfile) {
     unsigned i;
     calculate_dist();
     fprintf(outfile, "LDmemlatdist:");
@@ -355,7 +354,7 @@ public:
   }
 };
 
-my_time_vector *g_my_time_vector;
+my_time_vector* g_my_time_vector;
 
 void time_vector_create(int size) {
   g_my_time_vector = new my_time_vector(size, size);

@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <zlib.h>
 
+class gpgpu_context;
 /////////////////////////////////////////////////////////////////////////////////////
 // logger snapshot trigger:
 // - automate the snap_shot part of loggers to avoid modifying simulation loop
@@ -44,7 +45,7 @@
 /////////////////////////////////////////////////////////////////////////////////////
 
 class snap_shot_trigger {
-public:
+ public:
   snap_shot_trigger(unsigned long long interval)
       : m_snap_shot_interval(interval) {}
   virtual ~snap_shot_trigger() {}
@@ -61,7 +62,7 @@ public:
     return m_snap_shot_interval;
   }
 
-protected:
+ protected:
   unsigned long long m_snap_shot_interval;
 };
 
@@ -72,7 +73,7 @@ protected:
 /////////////////////////////////////////////////////////////////////////////////////
 
 class spill_log_interface {
-public:
+ public:
   spill_log_interface() {}
   virtual ~spill_log_interface() {}
 
@@ -84,9 +85,9 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 
 class thread_insn_span {
-public:
-  thread_insn_span(unsigned long long cycle);
-  thread_insn_span(const thread_insn_span &other);
+ public:
+  thread_insn_span(unsigned long long cycle, gpgpu_context *ctx);
+  thread_insn_span(const thread_insn_span &other, gpgpu_context *ctx);
   ~thread_insn_span();
 
   thread_insn_span &operator=(const thread_insn_span &other);
@@ -99,17 +100,18 @@ public:
   void print_sparse_histo(FILE *fout) const;
   void print_sparse_histo(gzFile fout) const;
 
-private:
+ private:
+  gpgpu_context *gpgpu_ctx;
   typedef tr1_hash_map<address_type, int> span_count_map;
   unsigned long long m_cycle;
   span_count_map m_insn_span_count;
 };
 
 class thread_CFlocality : public snap_shot_trigger, public spill_log_interface {
-public:
-  thread_CFlocality(std::string name, unsigned long long snap_shot_interval,
-                    int nthreads, address_type start_pc,
-                    unsigned long long start_cycle = 0);
+ public:
+  thread_CFlocality(gpgpu_context *ctx, std::string name,
+                    unsigned long long snap_shot_interval, int nthreads,
+                    address_type start_pc, unsigned long long start_cycle = 0);
   ~thread_CFlocality();
 
   void update_thread_pc(int thread_id, address_type pc);
@@ -121,7 +123,7 @@ public:
   void print_span(FILE *fout) const;
   void print_histo(FILE *fout) const;
 
-private:
+ private:
   std::string m_name;
 
   int m_nthreads;
@@ -137,7 +139,7 @@ private:
 /////////////////////////////////////////////////////////////////////////////////////
 
 class insn_warp_occ_logger {
-public:
+ public:
   insn_warp_occ_logger(int simd_width)
       : m_simd_width(simd_width),
         m_insn_warp_occ(1, linear_histogram(1, "", m_simd_width)),
@@ -173,7 +175,7 @@ public:
     }
   }
 
-private:
+ private:
   int m_simd_width;
   std::vector<linear_histogram> m_insn_warp_occ;
   int m_id;
@@ -185,7 +187,7 @@ private:
 /////////////////////////////////////////////////////////////////////////////////////
 
 class linear_histogram_snapshot {
-public:
+ public:
   linear_histogram_snapshot(int n_bins, unsigned long long cycle)
       : m_cycle(cycle), m_linear_histogram(n_bins, 0) {}
 
@@ -230,14 +232,14 @@ public:
     }
   }
 
-private:
+ private:
   unsigned long long m_cycle;
   std::vector<int> m_linear_histogram;
 };
 
 class linear_histogram_logger : public snap_shot_trigger,
                                 public spill_log_interface {
-public:
+ public:
   linear_histogram_logger(int n_bins, unsigned long long snap_shot_interval,
                           const char *name, bool reset_at_snap_shot = true,
                           unsigned long long start_cycle = 0);
@@ -255,7 +257,7 @@ public:
   void print_visualizer(FILE *fout);
   void print_visualizer(gzFile fout);
 
-private:
+ private:
   int m_n_bins;
   linear_histogram_snapshot m_curr_lin_hist;
   std::list<linear_histogram_snapshot> m_lin_hist_archive;
@@ -266,11 +268,14 @@ private:
   static int s_ids;
 };
 
+enum cache_access_logger_types { NORMALS, TEXTURE, CONSTANT, INSTRUCTION };
+
 void try_snap_shot(unsigned long long current_cycle);
 void set_spill_interval(unsigned long long interval);
 void spill_log_to_file(FILE *fout, int final, unsigned long long current_cycle);
 
-void create_thread_CFlogger(int n_loggers, int n_threads, address_type start_pc,
+void create_thread_CFlogger(gpgpu_context *ctx, int n_loggers, int n_threads,
+                            address_type start_pc,
                             unsigned long long logging_interval);
 void destroy_thread_CFlogger();
 void cflog_update_thread_pc(int logger_id, int thread_id, address_type pc);

@@ -29,10 +29,10 @@
 #ifndef STREAM_MANAGER_H_INCLUDED
 #define STREAM_MANAGER_H_INCLUDED
 
-#include "abstract_hardware_model.h"
-#include <list>
 #include <pthread.h>
 #include <time.h>
+#include <list>
+#include "abstract_hardware_model.h"
 
 // class stream_barrier {
 // public:
@@ -44,6 +44,43 @@
 //    unsigned m_pending_streams;
 //};
 
+struct CUevent_st {
+ public:
+  CUevent_st(bool blocking) {
+    m_uid = ++m_next_event_uid;
+    m_blocking = blocking;
+    m_updates = 0;
+    m_wallclock = 0;
+    m_gpu_tot_sim_cycle = 0;
+    m_issued = 0;
+    m_done = false;
+  }
+  void update(double cycle, time_t clk) {
+    m_updates++;
+    m_wallclock = clk;
+    m_gpu_tot_sim_cycle = cycle;
+    m_done = true;
+  }
+  // void set_done() { assert(!m_done); m_done=true; }
+  int get_uid() const { return m_uid; }
+  unsigned num_updates() const { return m_updates; }
+  bool done() const { return m_updates == m_issued; }
+  time_t clock() const { return m_wallclock; }
+  void issue() { m_issued++; }
+  unsigned int num_issued() const { return m_issued; }
+
+ private:
+  int m_uid;
+  bool m_blocking;
+  bool m_done;
+  unsigned int m_updates;
+  unsigned int m_issued;
+  time_t m_wallclock;
+  double m_gpu_tot_sim_cycle;
+
+  static int m_next_event_uid;
+};
+
 enum stream_operation_type {
   stream_no_op,
   stream_memcpy_host_to_device,
@@ -53,11 +90,12 @@ enum stream_operation_type {
   stream_memcpy_from_symbol,
   stream_prefetch_host_to_device,
   stream_kernel_launch,
-  stream_event
+  stream_event,
+  stream_wait_event
 };
 
 class stream_operation {
-public:
+ public:
   stream_operation() {
     m_kernel = NULL;
     m_type = stream_no_op;
@@ -94,10 +132,19 @@ public:
     m_stream = stream;
     m_done = false;
   }
-  stream_operation(class CUevent_st *e, struct CUstream_st *stream) {
+  stream_operation(struct CUevent_st *e, struct CUstream_st *stream) {
     m_kernel = NULL;
     m_type = stream_event;
     m_event = e;
+    m_stream = stream;
+    m_done = false;
+  }
+  stream_operation(struct CUstream_st *stream, class CUevent_st *e,
+                   unsigned int flags) {
+    m_kernel = NULL;
+    m_type = stream_wait_event;
+    m_event = e;
+    m_cnt = m_event->num_issued();
     m_stream = stream;
     m_done = false;
   }
@@ -154,6 +201,7 @@ public:
     m_sim_mode = false;
     m_done = false;
   }
+
   bool is_kernel() const { return m_type == stream_kernel_launch; }
   bool is_mem() const {
     return m_type == stream_memcpy_host_to_device ||
@@ -170,7 +218,7 @@ public:
   }
   void set_stream(CUstream_st *stream) { m_stream = stream; }
 
-private:
+ private:
   struct CUstream_st *m_stream;
 
   bool m_done;
@@ -187,44 +235,10 @@ private:
 
   bool m_sim_mode;
   kernel_info_t *m_kernel;
-  class CUevent_st *m_event;
+  struct CUevent_st *m_event;
 };
-
-class CUevent_st {
-public:
-  CUevent_st(bool blocking) {
-    m_uid = ++m_next_event_uid;
-    m_blocking = blocking;
-    m_updates = 0;
-    m_wallclock = 0;
-    m_gpu_tot_sim_cycle = 0;
-    m_done = false;
-  }
-  void update(double cycle, time_t clk) {
-    m_updates++;
-    m_wallclock = clk;
-    m_gpu_tot_sim_cycle = cycle;
-    m_done = true;
-  }
-  // void set_done() { assert(!m_done); m_done=true; }
-  int get_uid() const { return m_uid; }
-  unsigned num_updates() const { return m_updates; }
-  bool done() const { return m_done; }
-  time_t clock() const { return m_wallclock; }
-
-private:
-  int m_uid;
-  bool m_blocking;
-  bool m_done;
-  int m_updates;
-  time_t m_wallclock;
-  double m_gpu_tot_sim_cycle;
-
-  static int m_next_event_uid;
-};
-
 struct CUstream_st {
-public:
+ public:
   CUstream_st();
   bool empty();
   bool busy();
@@ -232,24 +246,24 @@ public:
   void push(const stream_operation &op);
   void record_next_done();
   stream_operation next();
-  void cancel_front(); // front operation fails, cancle the pending status
+  void cancel_front();  // front operation fails, cancle the pending status
   stream_operation &front() { return m_operations.front(); }
   void print(FILE *fp);
   unsigned get_uid() const { return m_uid; }
 
-private:
+ private:
   unsigned m_uid;
   static unsigned sm_next_stream_uid;
 
   std::list<stream_operation> m_operations;
-  bool m_pending; // front operation has started but not yet completed
+  bool m_pending;  // front operation has started but not yet completed
 
-  pthread_mutex_t m_lock; // ensure only one host or gpu manipulates stream
-                          // operation at one time
+  pthread_mutex_t m_lock;  // ensure only one host or gpu manipulates stream
+                           // operation at one time
 };
 
 class stream_manager {
-public:
+ public:
   stream_manager(gpgpu_sim *gpu, bool cuda_launch_blocking);
   bool register_finished_kernel(unsigned grid_uid);
   bool check_finished_kernel();
@@ -261,14 +275,17 @@ public:
   bool empty();
   void print(FILE *fp);
   void push(stream_operation op);
+  void pushCudaStreamWaitEventToAllStreams(CUevent_st *e, unsigned int flags);
   bool operation(bool *sim);
   void stop_all_running_kernels();
+  unsigned size() { return m_streams.size(); };
+  bool is_blocking() { return m_cuda_launch_blocking; };
 
   void register_prefetch(size_t m_device_addr, size_t m_device_allocation_ptr,
                          size_t m_cnt, struct CUstream_st *m_stream);
   CUstream_st *get_stream_zero() { return &m_stream_zero; }
 
-private:
+ private:
   void print_impl(FILE *fp);
 
   bool m_cuda_launch_blocking;
@@ -278,6 +295,7 @@ private:
   CUstream_st m_stream_zero;
   bool m_service_stream_zero;
   pthread_mutex_t m_lock;
+  std::list<struct CUstream_st *>::iterator m_last_stream;
 };
 
 #endif

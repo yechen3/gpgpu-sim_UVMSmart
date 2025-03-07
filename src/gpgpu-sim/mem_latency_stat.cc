@@ -39,13 +39,17 @@
 #include "stat-tool.h"
 #include "visualizer.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "../../libcuda/gpgpu_context.h"
+
 memory_stats_t::memory_stats_t(unsigned n_shader,
-                               const struct shader_core_config *shader_config,
-                               const struct memory_config *mem_config) {
+                               const shader_core_config *shader_config,
+                               const memory_config *mem_config,
+                               const class gpgpu_sim *gpu) {
   assert(mem_config->m_valid);
   assert(shader_config->m_valid);
 
@@ -77,6 +81,7 @@ memory_stats_t::memory_stats_t(unsigned n_shader,
 
   m_n_shader = n_shader;
   m_memory_config = mem_config;
+  m_gpu = gpu;
   total_n_access = 0;
   total_n_reads = 0;
   total_n_writes = 0;
@@ -85,6 +90,10 @@ memory_stats_t::memory_stats_t(unsigned n_shader,
   max_mf_latency = 0;
   max_icnt2mem_latency = 0;
   max_icnt2sh_latency = 0;
+  tot_icnt2mem_latency = 0;
+  tot_icnt2sh_latency = 0;
+  tot_mrq_num = 0;
+  tot_mrq_latency = 0;
   memset(mrq_lat_table, 0, sizeof(unsigned) * 32);
   memset(dq_lat_table, 0, sizeof(unsigned) * 32);
   memset(mf_lat_table, 0, sizeof(unsigned) * 32);
@@ -95,8 +104,8 @@ memory_stats_t::memory_stats_t(unsigned n_shader,
   max_warps =
       n_shader *
       (shader_config->n_thread_per_shader / shader_config->warp_size + 1);
-  mf_tot_lat_pw = 0; // total latency summed up per window. divide by
-                     // mf_num_lat_pw to obtain average latency Per Window
+  mf_tot_lat_pw = 0;  // total latency summed up per window. divide by
+                      // mf_num_lat_pw to obtain average latency Per Window
   mf_total_lat = 0;
   num_mfs = 0;
   printf("*** Initializing Memory Statistics ***\n");
@@ -156,6 +165,12 @@ memory_stats_t::memory_stats_t(unsigned n_shader,
     }
   }
 
+  // AerialVision L2 stats
+  L2_read_miss = 0;
+  L2_write_miss = 0;
+  L2_read_hit = 0;
+  L2_write_hit = 0;
+
   L2_cbtoL2length =
       (unsigned int *)calloc(mem_config->m_n_mem, sizeof(unsigned int));
   L2_cbtoL2writelength =
@@ -173,7 +188,8 @@ memory_stats_t::memory_stats_t(unsigned n_shader,
 // record the total latency
 unsigned memory_stats_t::memlatstat_done(mem_fetch *mf) {
   unsigned mf_latency;
-  mf_latency = (gpu_sim_cycle + gpu_tot_sim_cycle) - mf->get_timestamp();
+  mf_latency =
+      (m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle) - mf->get_timestamp();
   mf_num_lat_pw++;
   mf_tot_lat_pw += mf_latency;
   unsigned idx = LOGB2(mf_latency);
@@ -182,21 +198,29 @@ unsigned memory_stats_t::memlatstat_done(mem_fetch *mf) {
   shader_mem_lat_log(mf->get_sid(), mf_latency);
   mf_total_lat_table[mf->get_tlx_addr().chip][mf->get_tlx_addr().bk] +=
       mf_latency;
-  if (mf_latency > max_mf_latency)
-    max_mf_latency = mf_latency;
+  if (mf_latency > max_mf_latency) max_mf_latency = mf_latency;
   return mf_latency;
 }
 
 void memory_stats_t::memlatstat_read_done(mem_fetch *mf) {
-  if (m_memory_config->gpgpu_memlatency_stat) {
+  if (m_memory_config->SST_mode) {
+    // in SST mode, we just calculate mem latency
+    unsigned mf_latency;
+    mf_latency =
+        (m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle) - mf->get_timestamp();
+    num_mfs++;
+    mf_total_lat += mf_latency;
+    if (mf_latency > max_mf_latency) max_mf_latency = mf_latency;
+  } else if (m_memory_config->gpgpu_memlatency_stat) {
     unsigned mf_latency = memlatstat_done(mf);
     if (mf_latency >
         mf_max_lat_table[mf->get_tlx_addr().chip][mf->get_tlx_addr().bk])
       mf_max_lat_table[mf->get_tlx_addr().chip][mf->get_tlx_addr().bk] =
           mf_latency;
     unsigned icnt2sh_latency;
-    icnt2sh_latency =
-        (gpu_tot_sim_cycle + gpu_sim_cycle) - mf->get_return_timestamp();
+    icnt2sh_latency = (m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle) -
+                      mf->get_return_timestamp();
+    tot_icnt2sh_latency += icnt2sh_latency;
     icnt2sh_lat_table[LOGB2(icnt2sh_latency)]++;
     if (icnt2sh_latency > max_icnt2sh_latency)
       max_icnt2sh_latency = icnt2sh_latency;
@@ -208,27 +232,33 @@ void memory_stats_t::memlatstat_dram_access(mem_fetch *mf) {
   unsigned bank = mf->get_tlx_addr().bk;
   if (m_memory_config->gpgpu_memlatency_stat) {
     if (mf->get_is_write()) {
-      if (mf->get_sid() < m_n_shader) { // do not count L2_writebacks here
+      if (mf->get_sid() < m_n_shader) {  // do not count L2_writebacks here
         bankwrites[mf->get_sid()][dram_id][bank]++;
         shader_mem_acc_log(mf->get_sid(), dram_id, bank, 'w');
       }
-      totalbankwrites[dram_id][bank]++;
+      totalbankwrites[dram_id][bank] +=
+          ceil(mf->get_data_size() / m_memory_config->dram_atom_size);
     } else {
       bankreads[mf->get_sid()][dram_id][bank]++;
       shader_mem_acc_log(mf->get_sid(), dram_id, bank, 'r');
-      totalbankreads[dram_id][bank]++;
+      totalbankreads[dram_id][bank] +=
+          ceil(mf->get_data_size() / m_memory_config->dram_atom_size);
     }
-    mem_access_type_stats[mf->get_access_type()][dram_id][bank]++;
+    mem_access_type_stats[mf->get_access_type()][dram_id][bank] +=
+        ceil(mf->get_data_size() / m_memory_config->dram_atom_size);
   }
+
   if (mf->get_pc() != (unsigned)-1)
-    ptx_file_line_stats_add_dram_traffic(mf->get_pc(), mf->get_data_size());
+    m_gpu->gpgpu_ctx->stats->ptx_file_line_stats_add_dram_traffic(
+        mf->get_pc(), mf->get_data_size());
 }
 
 void memory_stats_t::memlatstat_icnt2mem_pop(mem_fetch *mf) {
   if (m_memory_config->gpgpu_memlatency_stat) {
     unsigned icnt2mem_latency;
     icnt2mem_latency =
-        (gpu_tot_sim_cycle + gpu_sim_cycle) - mf->get_timestamp();
+        (m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle) - mf->get_timestamp();
+    tot_icnt2mem_latency += icnt2mem_latency;
     icnt2mem_lat_table[LOGB2(icnt2mem_latency)]++;
     if (icnt2mem_latency > max_icnt2mem_latency)
       max_icnt2mem_latency = icnt2mem_latency;
@@ -251,15 +281,25 @@ void memory_stats_t::memlatstat_print(unsigned n_mem, unsigned gpu_mem_n_bk) {
   unsigned max_bank_accesses, min_bank_accesses, max_chip_accesses,
       min_chip_accesses;
 
-  if (m_memory_config->gpgpu_memlatency_stat) {
-    printf("maxmrqlatency = %d \n", max_mrq_latency);
-    printf("maxdqlatency = %d \n", max_dq_latency);
+  if (m_memory_config->SST_mode) {
+    // in SST mode, we just calculate mem latency
+    printf("max_mem_SST_latency = %d \n", max_mf_latency);
+    if (num_mfs)
+      printf("average_mf_SST_latency = %lld \n", mf_total_lat / num_mfs);
+  } else if (m_memory_config->gpgpu_memlatency_stat) {
     printf("maxmflatency = %d \n", max_mf_latency);
+    printf("max_icnt2mem_latency = %d \n", max_icnt2mem_latency);
+    printf("maxmrqlatency = %d \n", max_mrq_latency);
+    // printf("maxdqlatency = %d \n", max_dq_latency);
+    printf("max_icnt2sh_latency = %d \n", max_icnt2sh_latency);
     if (num_mfs) {
       printf("averagemflatency = %lld \n", mf_total_lat / num_mfs);
+      printf("avg_icnt2mem_latency = %lld \n", tot_icnt2mem_latency / num_mfs);
+      if (tot_mrq_num)
+        printf("avg_mrq_latency = %lld \n", tot_mrq_latency / tot_mrq_num);
+
+      printf("avg_icnt2sh_latency = %lld \n", tot_icnt2sh_latency / num_mfs);
     }
-    printf("max_icnt2mem_latency = %d \n", max_icnt2mem_latency);
-    printf("max_icnt2sh_latency = %d \n", max_icnt2sh_latency);
     printf("mrq_lat_table:");
     for (i = 0; i < 32; i++) {
       printf("%d \t", mrq_lat_table[i]);
@@ -340,18 +380,14 @@ void memory_stats_t::memlatstat_print(unsigned n_mem, unsigned gpu_mem_n_bk) {
       printf("dram[%d]: ", i);
       for (j = 0; j < gpu_mem_n_bk; j++) {
         l = totalbankaccesses[i][j];
-        if (l < min_bank_accesses)
-          min_bank_accesses = l;
-        if (l > max_bank_accesses)
-          max_bank_accesses = l;
+        if (l < min_bank_accesses) min_bank_accesses = l;
+        if (l > max_bank_accesses) max_bank_accesses = l;
         k += l;
         m += l;
         printf("%9d ", l);
       }
-      if (m < min_chip_accesses)
-        min_chip_accesses = m;
-      if (m > max_chip_accesses)
-        max_chip_accesses = m;
+      if (m < min_chip_accesses) min_chip_accesses = m;
+      if (m > max_chip_accesses) max_chip_accesses = m;
       m = 0;
       printf("\n");
     }
@@ -380,22 +416,18 @@ void memory_stats_t::memlatstat_print(unsigned n_mem, unsigned gpu_mem_n_bk) {
       printf("dram[%d]: ", i);
       for (j = 0; j < gpu_mem_n_bk; j++) {
         l = totalbankreads[i][j];
-        if (l < min_bank_accesses)
-          min_bank_accesses = l;
-        if (l > max_bank_accesses)
-          max_bank_accesses = l;
+        if (l < min_bank_accesses) min_bank_accesses = l;
+        if (l > max_bank_accesses) max_bank_accesses = l;
         k += l;
         m += l;
         printf("%9d ", l);
       }
-      if (m < min_chip_accesses)
-        min_chip_accesses = m;
-      if (m > max_chip_accesses)
-        max_chip_accesses = m;
+      if (m < min_chip_accesses) min_chip_accesses = m;
+      if (m > max_chip_accesses) max_chip_accesses = m;
       m = 0;
       printf("\n");
     }
-    printf("total reads: %d\n", k);
+    printf("total dram reads = %d\n", k);
     if (min_bank_accesses)
       printf("bank skew: %d/%d = %4.2f\n", max_bank_accesses, min_bank_accesses,
              (float)max_bank_accesses / min_bank_accesses);
@@ -420,22 +452,18 @@ void memory_stats_t::memlatstat_print(unsigned n_mem, unsigned gpu_mem_n_bk) {
       printf("dram[%d]: ", i);
       for (j = 0; j < gpu_mem_n_bk; j++) {
         l = totalbankwrites[i][j];
-        if (l < min_bank_accesses)
-          min_bank_accesses = l;
-        if (l > max_bank_accesses)
-          max_bank_accesses = l;
+        if (l < min_bank_accesses) min_bank_accesses = l;
+        if (l > max_bank_accesses) max_bank_accesses = l;
         k += l;
         m += l;
         printf("%9d ", l);
       }
-      if (m < min_chip_accesses)
-        min_chip_accesses = m;
-      if (m > max_chip_accesses)
-        max_chip_accesses = m;
+      if (m < min_chip_accesses) min_chip_accesses = m;
+      if (m > max_chip_accesses) max_chip_accesses = m;
       m = 0;
       printf("\n");
     }
-    printf("total reads: %d\n", k);
+    printf("total dram writes = %d\n", k);
     if (min_bank_accesses)
       printf("bank skew: %d/%d = %4.2f\n", max_bank_accesses, min_bank_accesses,
              (float)max_bank_accesses / min_bank_accesses);
@@ -473,8 +501,9 @@ void memory_stats_t::memlatstat_print(unsigned n_mem, unsigned gpu_mem_n_bk) {
   }
 
   if (m_memory_config->gpgpu_memlatency_stat & GPU_MEMLATSTAT_MC) {
-    printf("\nNumber of Memory Banks Accessed per Memory Operation per Warp "
-           "(from 0):\n");
+    printf(
+        "\nNumber of Memory Banks Accessed per Memory Operation per Warp (from "
+        "0):\n");
     unsigned long long accum_MCBs_accessed = 0;
     unsigned long long tot_mem_ops_per_warp = 0;
     for (i = 0; i < n_mem * gpu_mem_n_bk; i++) {
@@ -483,9 +512,10 @@ void memory_stats_t::memlatstat_print(unsigned n_mem, unsigned gpu_mem_n_bk) {
       printf("%d\t", num_MCBs_accessed[i]);
     }
 
-    printf("\nAverage # of Memory Banks Accessed per Memory Operation per "
-           "Warp=%f\n",
-           (float)accum_MCBs_accessed / tot_mem_ops_per_warp);
+    printf(
+        "\nAverage # of Memory Banks Accessed per Memory Operation per "
+        "Warp=%f\n",
+        (float)accum_MCBs_accessed / tot_mem_ops_per_warp);
 
     // printf("\nAverage Difference Between First and Last Response from Memory
     // System per warp = ");

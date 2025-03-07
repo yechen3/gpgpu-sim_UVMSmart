@@ -35,39 +35,64 @@
 unsigned mem_fetch::sm_next_mf_request_uid = 1;
 
 mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
-                     unsigned ctrl_size, unsigned wid, unsigned sid,
-                     unsigned tpc, const class memory_config *config) {
+                     unsigned long long streamID, unsigned ctrl_size,
+                     unsigned wid, unsigned sid, unsigned tpc,
+                     const memory_config *config, unsigned long long cycle,
+                     mem_fetch *m_original_mf, mem_fetch *m_original_wr_mf)
+    : m_access(access)
+
+{
   m_request_uid = sm_next_mf_request_uid++;
   m_access = access;
   if (inst) {
     m_inst = *inst;
     assert(wid == m_inst.warp_id());
+    //printf("MEM_FETCH DEBUG: mem_fetch.cc :: mf %p is formed and m_inst info, mem_access.m_uid=%d\n", this, m_access.get_uid());
+    //m_inst.print_insn(stdout);
   }
+  m_streamID = streamID;
+  m_split = false;
   m_data_size = access.get_size();
   m_ctrl_size = ctrl_size;
   m_sid = sid;
   m_tpc = tpc;
   m_wid = wid;
-  config->m_address_mapping.addrdec_tlx(access.get_addr(), &m_raw_addr);
-  m_partition_addr =
-      config->m_address_mapping.partition_address(access.get_addr());
+
+  if (!config->is_SST_mode()) {
+    // In SST memory model, the SST memory hierarchy is
+    // responsible to generate the correct address mapping
+    config->m_address_mapping.addrdec_tlx(access.get_addr(), &m_raw_addr);
+    m_partition_addr =
+        config->m_address_mapping.partition_address(access.get_addr());
+  }
+
   m_type = m_access.is_write() ? WRITE_REQUEST : READ_REQUEST;
-  m_timestamp = gpu_sim_cycle + gpu_tot_sim_cycle;
+  m_timestamp = cycle;
   m_timestamp2 = 0;
   m_status = MEM_FETCH_INITIALIZED;
-  m_status_change = gpu_sim_cycle + gpu_tot_sim_cycle;
+  m_status_change = cycle;
   m_mem_config = config;
   icnt_flit_size = config->icnt_flit_size;
 
   m_dma = false;
+
+  original_mf = m_original_mf;
+  original_wr_mf = m_original_wr_mf;
+  if (m_original_mf) {
+    m_raw_addr.chip = m_original_mf->get_tlx_addr().chip;
+    m_raw_addr.sub_partition = m_original_mf->get_tlx_addr().sub_partition;
+  }
+  // MEM_FETCH DEBUG
+  //printf("MEM_FETCH DEBUG: mem_fetch.cc :: mf %p is formed, mem_access.m_uid=%d\n", this, m_access.get_uid());
+  //print(stdout);
 }
 
 mem_fetch::~mem_fetch() { m_status = MEM_FETCH_DELETED; }
 
 #define MF_TUP_BEGIN(X) static const char *Status_str[] = {
 #define MF_TUP(X) #X
-#define MF_TUP_END(X)                                                          \
-  }                                                                            \
+#define MF_TUP_END(X) \
+  }                   \
   ;
 #include "mem_fetch_status.tup"
 #undef MF_TUP_BEGIN
@@ -75,10 +100,10 @@ mem_fetch::~mem_fetch() { m_status = MEM_FETCH_DELETED; }
 #undef MF_TUP_END
 
 void mem_fetch::print(FILE *fp, bool print_inst) const {
-  if (this == NULL) {
-    fprintf(fp, " <NULL mem_fetch pointer>\n");
-    return;
-  }
+  // if (this == NULL) { // doenst make sense!
+  //   fprintf(fp, " <NULL mem_fetch pointer>\n");
+  //   return;
+  // }
   fprintf(fp, "  mf: uid=%6u, sid%02u:w%02u, part=%u, ", m_request_uid, m_sid,
           m_wid, m_raw_addr.chip);
   m_access.print(fp);
@@ -99,22 +124,19 @@ void mem_fetch::set_status(enum mem_fetch_status status,
 }
 
 bool mem_fetch::isatomic() const {
-  if (m_inst.empty())
-    return false;
+  if (m_inst.empty()) return false;
   return m_inst.isatomic();
 }
 
 void mem_fetch::do_atomic() { m_inst.do_atomic(m_access.get_warp_mask()); }
 
 bool mem_fetch::istexture() const {
-  if (m_inst.empty())
-    return false;
+  if (m_inst.empty()) return false;
   return m_inst.space.get_type() == tex_space;
 }
 
 bool mem_fetch::isconst() const {
-  if (m_inst.empty())
-    return false;
+  if (m_inst.empty()) return false;
   return (m_inst.space.get_type() == const_space) ||
          (m_inst.space.get_type() == param_space_kernel);
 }

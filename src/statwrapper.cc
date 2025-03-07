@@ -1,6 +1,6 @@
 // a Wraper function for stats class
-#include "intersim2/stats.hpp"
 #include <stdio.h>
+#include "intersim2/stats.hpp"
 
 Stats *StatCreate(const char *name, double bin_size, int num_bins) {
   Stats *newstat = new Stats(NULL, name, bin_size, num_bins);

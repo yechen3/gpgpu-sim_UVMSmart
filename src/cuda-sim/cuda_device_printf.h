@@ -29,8 +29,8 @@
 #ifndef CUDA_DEVICE_PRINTF_INCLUDED
 #define CUDA_DEVICE_PRINTF_INCLUDED
 
-void gpgpusim_cuda_vprintf(const class ptx_instruction *pI,
-                           class ptx_thread_info *thread,
-                           const class function_info *target_func);
+void gpgpusim_cuda_vprintf(const class ptx_instruction* pI,
+                           class ptx_thread_info* thread,
+                           const class function_info* target_func);
 
 #endif

@@ -27,14 +27,15 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "memory.h"
-#include "../debug.h"
 #include <stdlib.h>
+#include "../../libcuda/gpgpu_context.h"
+#include "../debug.h"
 
 template <unsigned BSIZE>
 memory_space_impl<BSIZE>::memory_space_impl(std::string name,
                                             unsigned hash_size,
                                             unsigned long long gddr_size)
-    : num_gddr_pages(gddr_size / BSIZE) {
+: num_gddr_pages(gddr_size / BSIZE) {
   m_name = name;
   MEM_MAP_RESIZE(hash_size);
 
@@ -52,11 +53,18 @@ memory_space_impl<BSIZE>::memory_space_impl(std::string name,
 }
 
 template <unsigned BSIZE>
+void memory_space_impl<BSIZE>::write_only(mem_addr_t offset, mem_addr_t index,
+                                          size_t length, const void *data) {
+  m_data[index].write(offset, length, (const unsigned char *)data);
+}
+
+template <unsigned BSIZE>
 void memory_space_impl<BSIZE>::write(mem_addr_t addr, size_t length,
                                      const void *data,
                                      class ptx_thread_info *thd,
                                      const ptx_instruction *pI) {
   mem_addr_t index = addr >> m_log2_block_size;
+
   if ((addr + length) <= (index + 1) * BSIZE) {
     // fast route for intra-block access
     unsigned offset = addr & (BSIZE - 1);
@@ -93,7 +101,8 @@ void memory_space_impl<BSIZE>::write(mem_addr_t addr, size_t length,
       mem_addr_t wa = i->second;
       if (((addr <= wa) && ((addr + length) > wa)) ||
           ((addr > wa) && (addr < (wa + 4))))
-        hit_watchpoint(i->first, thd, pI);
+        thd->get_gpu()->gpgpu_ctx->the_gpgpusim->g_the_gpu->hit_watchpoint(
+            i->first, thd, pI);
     }
   }
 }
@@ -124,12 +133,14 @@ void memory_space_impl<BSIZE>::read_single_block(mem_addr_t blk_idx,
                                                  mem_addr_t addr, size_t length,
                                                  void *data) const {
   if ((addr + length) > (blk_idx + 1) * BSIZE) {
-    printf("GPGPU-Sim PTX: ERROR * access to memory \'%s\' is unaligned : "
-           "addr=0x%x, length=%zu\n",
-           m_name.c_str(), addr, length);
-    printf("GPGPU-Sim PTX: (addr+length)=0x%lx > 0x%x=(index+1)*BSIZE, "
-           "index=0x%x, BSIZE=0x%x\n",
-           (addr + length), (blk_idx + 1) * BSIZE, blk_idx, BSIZE);
+    printf(
+        "GPGPU-Sim PTX: ERROR * access to memory \'%s\' is unaligned : "
+        "addr=0x%llx, length=%zu\n",
+        m_name.c_str(), addr, length);
+    printf(
+        "GPGPU-Sim PTX: (addr+length)=0x%llx > 0x%llx=(index+1)*BSIZE, "
+        "index=0x%llx, BSIZE=0x%x\n",
+        (addr + length), (blk_idx + 1) * BSIZE, blk_idx, BSIZE);
     throw 1;
   }
   typename map_t::const_iterator i = m_data.find(blk_idx);
@@ -182,8 +193,9 @@ void memory_space_impl<BSIZE>::read(mem_addr_t addr, size_t length,
 template <unsigned BSIZE>
 void memory_space_impl<BSIZE>::print(const char *format, FILE *fout) const {
   typename map_t::const_iterator i_page;
+
   for (i_page = m_data.begin(); i_page != m_data.end(); ++i_page) {
-    fprintf(fout, "%s - %#x:", m_name.c_str(), i_page->first);
+    fprintf(fout, "%s %08llx:", m_name.c_str(), i_page->first);
     i_page->second.print(format, fout);
   }
 }
@@ -341,6 +353,7 @@ mem_addr_t memory_space_impl<BSIZE>::get_mem_addr(mem_addr_t pg_index) {
 
 template class memory_space_impl<32>;
 template class memory_space_impl<64>;
+//template class memory_space_impl<8192>;
 template class memory_space_impl<4096>;
 template class memory_space_impl<1024 * 1024 * 2>;
 template class memory_space_impl<16 * 1024>;

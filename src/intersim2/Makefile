@@ -28,7 +28,7 @@
 # Makefile
 #
 CXX = g++
-CC = gcc
+CC = g++
 CREATE_LIBRARY ?= 0
 INTERFACE = interconnect_interface.cpp
 DEBUG ?= 0
@@ -36,7 +36,7 @@ DEBUG ?= 0
 LEX = flex
 YACC   = bison -y
 DEFINE = #-DTRACK_STALLS -DTRACK_BUFFERS -DTRACK_FLOWS -DTRACK_CREDITS
-INCPATH = -I. -Iarbiters -Iallocators -Irouters -Inetworks -Ipower
+INCPATH = -I. -Iarbiters -Iallocators -Irouters -Inetworks -Ipower -I$(GPGPUSIM_ROOT)/src
 
 ifeq ($(CREATE_LIBRARY),1)
 INCPATH += -I$(GPGPUSIM_ROOT)/src/gpgpu-sim/
@@ -48,6 +48,7 @@ CPPFLAGS += -O3
 endif
 CPPFLAGS += -g
 CPPFLAGS += -fPIC
+CPPFLAGS += -I$(CUDA_INSTALL_PATH)/include
 LFLAGS +=
 
 
@@ -135,10 +136,10 @@ depend:
 	makedepend -f$(OBJDIR)/Makefile.makedepend -I$(INCPATH) -p$(OBJDIR)/ $(ALL_SRCS) 2> /dev/null
 
 ${LEX_OBJS}: $(OBJDIR)/lex.yy.c $(OBJDIR)/y.tab.h
-	$(CC) $(CPPFLAGS) -c $< -o $@
+	$(CC) -Wno-unused-function $(CPPFLAGS) -c $< -o $@
 
 ${YACC_OBJS}: $(OBJDIR)/y.tab.c $(OBJDIR)/y.tab.h
-	$(CC) $(CPPFLAGS) -c $< -o $@
+	$(CC) -Wno-unused-function $(CPPFLAGS) -c $< -o $@
 
 ${OBJDIR}/%.o: %.cpp 
 	$(CXX) $(CPPFLAGS) -c $< -o $@

@@ -27,11 +27,22 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "stream_manager.h"
+#include "../libcuda/gpgpu_context.h"
 #include "cuda-sim/cuda-sim.h"
 #include "gpgpu-sim/gpu-sim.h"
 #include "gpgpusim_entrypoint.h"
 
 unsigned CUstream_st::sm_next_stream_uid = 0;
+
+// SST memcpy callbacks
+extern void SST_callback_memcpy_H2D_done();
+extern void SST_callback_memcpy_D2H_done();
+extern void SST_callback_memcpy_to_symbol_done();
+extern void SST_callback_memcpy_from_symbol_done();
+__attribute__((weak)) void SST_callback_memcpy_H2D_done() {}
+__attribute__((weak)) void SST_callback_memcpy_D2H_done() {}
+__attribute__((weak)) void SST_callback_memcpy_to_symbol_done() {}
+__attribute__((weak)) void SST_callback_memcpy_from_symbol_done() {}
 
 CUstream_st::CUstream_st() {
   m_pending = false;
@@ -119,128 +130,137 @@ void stream_manager::register_prefetch(size_t m_device_addr,
 }
 
 bool stream_operation::do_operation(gpgpu_sim *gpu) {
-  if (is_noop())
-    return true;
+  if (is_noop()) return true;
 
   assert(!m_done && m_stream);
 
-  unsigned long long cur_cycle = gpu_sim_cycle + gpu_tot_sim_cycle;
+  unsigned long long cur_cycle = gpu->gpu_sim_cycle + gpu->gpu_tot_sim_cycle;
+
   if (g_debug_execution >= 3)
     printf("GPGPU-Sim API: stream %u performing ", m_stream->get_uid());
   switch (m_type) {
-  case stream_prefetch_host_to_device:
-    gpu->getGmmu()->activate_prefetch(m_device_address_dst, m_cnt, m_stream);
-    if (sim_prof_enable) {
-      event_stats *cp_pref =
-          new memory_stats(prefetch, cur_cycle, m_device_address_dst, m_cnt,
-                           m_stream->get_uid());
-      sim_prof[cur_cycle].push_back(cp_pref);
-    }
-    break;
-  case stream_memcpy_host_to_device:
-    if (g_debug_execution >= 3)
-      printf("memcpy host-to-device\n");
-    gpu->memcpy_to_gpu(m_device_address_dst, m_host_address_src, m_cnt);
-    if (sim_prof_enable) {
-      unsigned long long transfer_time =
-          gpu->getGmmu()->calculate_transfer_time(m_cnt);
-      gpu_tot_sim_cycle += transfer_time;
-      event_stats *cp_h2d =
-          new memory_stats(memcpy_h2d, cur_cycle, cur_cycle + transfer_time,
-                           m_device_address_dst, m_cnt, m_stream->get_uid());
-      sim_prof[cur_cycle].push_back(cp_h2d);
-    }
-    m_stream->record_next_done();
-    break;
-  case stream_memcpy_device_to_host:
-    if (g_debug_execution >= 3)
-      printf("memcpy device-to-host\n");
-    gpu->memcpy_from_gpu(m_host_address_dst, m_device_address_src, m_cnt);
-    if (sim_prof_enable) {
-      unsigned long long transfer_time =
-          gpu->getGmmu()->calculate_transfer_time(m_cnt);
-      gpu_tot_sim_cycle += transfer_time;
-      event_stats *cp_d2h =
-          new memory_stats(memcpy_d2h, cur_cycle, cur_cycle + transfer_time,
-                           m_device_address_src, m_cnt, m_stream->get_uid());
-      sim_prof[cur_cycle].push_back(cp_d2h);
-    }
-    m_stream->record_next_done();
-    break;
-  case stream_memcpy_device_to_device:
-    if (g_debug_execution >= 3)
-      printf("memcpy device-to-device\n");
-    gpu->memcpy_gpu_to_gpu(m_device_address_dst, m_device_address_src, m_cnt);
-    if (sim_prof_enable) {
-      event_stats *cp_d2d =
-          new memory_stats(memcpy_d2d, cur_cycle, m_device_address_dst, m_cnt,
-                           m_stream->get_uid());
-      sim_prof[cur_cycle].push_back(cp_d2d);
-    }
-    m_stream->record_next_done();
-    break;
-  case stream_memcpy_to_symbol:
-    if (g_debug_execution >= 3)
-      printf("memcpy to symbol\n");
-    gpgpu_ptx_sim_memcpy_symbol(m_symbol, m_host_address_src, m_cnt, m_offset,
-                                1, gpu);
-    m_stream->record_next_done();
-    break;
-  case stream_memcpy_from_symbol:
-    if (g_debug_execution >= 3)
-      printf("memcpy from symbol\n");
-    gpgpu_ptx_sim_memcpy_symbol(m_symbol, m_host_address_dst, m_cnt, m_offset,
-                                0, gpu);
-    m_stream->record_next_done();
-    break;
-  case stream_kernel_launch:
-    if (m_sim_mode) { // Functional Sim
-      if (g_debug_execution >= 3) {
-        printf("kernel %d: \'%s\' transfer to GPU hardware scheduler\n",
-               m_kernel->get_uid(), m_kernel->name().c_str());
-        m_kernel->print_parent_info();
+    case stream_prefetch_host_to_device:
+      gpu->getGmmu()->activate_prefetch(m_device_address_dst, m_cnt, m_stream);
+      if (sim_prof_enable) {
+        event_stats *cp_pref =
+            new memory_stats(prefetch, cur_cycle, m_device_address_dst, m_cnt,
+                            m_stream->get_uid());
+        sim_prof[cur_cycle].push_back(cp_pref);
       }
-      gpu->set_cache_config(m_kernel->name());
-      gpu->functional_launch(m_kernel);
-    } else { // Performance Sim
-      if (gpu->can_start_kernel() && m_kernel->m_launch_latency == 0) {
+      break;
+    case stream_memcpy_host_to_device:
+      if (g_debug_execution >= 3) printf("memcpy host-to-device\n");
+      gpu->memcpy_to_gpu(m_device_address_dst, m_host_address_src, m_cnt);
+      if (sim_prof_enable) {
+        unsigned long long transfer_time =
+            gpu->getGmmu()->calculate_transfer_time(m_cnt);
+        gpu->gpu_tot_sim_cycle += transfer_time;
+        event_stats *cp_h2d =
+            new memory_stats(memcpy_h2d, cur_cycle, cur_cycle + transfer_time,
+                            m_device_address_dst, m_cnt, m_stream->get_uid());
+        sim_prof[cur_cycle].push_back(cp_h2d);
+      }
+      m_stream->record_next_done();
+      if (gpu->is_SST_mode()) SST_callback_memcpy_H2D_done();
+      break;
+    case stream_memcpy_device_to_host:
+      if (g_debug_execution >= 3) printf("memcpy device-to-host\n");
+      gpu->memcpy_from_gpu(m_host_address_dst, m_device_address_src, m_cnt);
+      if (sim_prof_enable) {
+        unsigned long long transfer_time =
+            gpu->getGmmu()->calculate_transfer_time(m_cnt);
+        gpu->gpu_tot_sim_cycle += transfer_time;
+        event_stats *cp_d2h =
+            new memory_stats(memcpy_d2h, cur_cycle, cur_cycle + transfer_time,
+                            m_device_address_src, m_cnt, m_stream->get_uid());
+        sim_prof[cur_cycle].push_back(cp_d2h);
+      }
+      m_stream->record_next_done();
+      if (gpu->is_SST_mode()) SST_callback_memcpy_D2H_done();
+      break;
+    case stream_memcpy_device_to_device:
+      if (g_debug_execution >= 3) printf("memcpy device-to-device\n");
+      gpu->memcpy_gpu_to_gpu(m_device_address_dst, m_device_address_src, m_cnt);
+      if (sim_prof_enable) {
+        event_stats *cp_d2d =
+            new memory_stats(memcpy_d2d, cur_cycle, m_device_address_dst, m_cnt,
+                            m_stream->get_uid());
+        sim_prof[cur_cycle].push_back(cp_d2d);
+      }
+      m_stream->record_next_done();
+      break;
+    case stream_memcpy_to_symbol:
+      if (g_debug_execution >= 3) printf("memcpy to symbol\n");
+      gpu->gpgpu_ctx->func_sim->gpgpu_ptx_sim_memcpy_symbol(
+          m_symbol, m_host_address_src, m_cnt, m_offset, 1, gpu);
+      m_stream->record_next_done();
+      if (gpu->is_SST_mode()) SST_callback_memcpy_to_symbol_done();
+      break;
+    case stream_memcpy_from_symbol:
+      if (g_debug_execution >= 3) printf("memcpy from symbol\n");
+      gpu->gpgpu_ctx->func_sim->gpgpu_ptx_sim_memcpy_symbol(
+          m_symbol, m_host_address_dst, m_cnt, m_offset, 0, gpu);
+      m_stream->record_next_done();
+      if (gpu->is_SST_mode()) SST_callback_memcpy_from_symbol_done();
+      break;
+    case stream_kernel_launch:
+      if (m_sim_mode) {  // Functional Sim
         if (g_debug_execution >= 3) {
           printf("kernel %d: \'%s\' transfer to GPU hardware scheduler\n",
                  m_kernel->get_uid(), m_kernel->name().c_str());
           m_kernel->print_parent_info();
         }
         gpu->set_cache_config(m_kernel->name());
-        gpu->launch(m_kernel);
+        gpu->functional_launch(m_kernel);
+      } else {  // Performance Sim
+        if (gpu->can_start_kernel() && m_kernel->m_launch_latency == 0) {
+          if (g_debug_execution >= 3) {
+            printf("kernel %d: \'%s\' transfer to GPU hardware scheduler\n",
+                   m_kernel->get_uid(), m_kernel->name().c_str());
+            m_kernel->print_parent_info();
+          }
+          gpu->set_cache_config(m_kernel->name());
+          gpu->launch(m_kernel);
 
-        gpu->getGmmu()->log_kernel_info(
-            m_kernel->get_uid(), gpu_sim_cycle + gpu_tot_sim_cycle, false);
+          gpu->getGmmu()->log_kernel_info(
+              m_kernel->get_uid(), gpu->gpu_sim_cycle + gpu->gpu_tot_sim_cycle, false);
 
-        if (sim_prof_enable) {
-          kernel_stats *k_s = new kernel_stats(cur_cycle, m_stream->get_uid(),
-                                               m_kernel->get_uid());
-          sim_prof[cur_cycle].push_back(k_s);
+          if (sim_prof_enable) {
+            kernel_stats *k_s = new kernel_stats(cur_cycle, m_stream->get_uid(),
+                                                m_kernel->get_uid());
+            sim_prof[cur_cycle].push_back(k_s);
+          }
+        } else {
+          if (m_kernel->m_launch_latency) m_kernel->m_launch_latency--;
+          if (g_debug_execution >= 3)
+            printf(
+                "kernel %d: \'%s\', latency %u not ready to transfer to GPU "
+                "hardware scheduler\n",
+                m_kernel->get_uid(), m_kernel->name().c_str(),
+                m_kernel->m_launch_latency);
+          return false;
         }
+      }
+      break;
+    case stream_event: {
+      printf("event update\n");
+      time_t wallclock = time((time_t *)NULL);
+      m_event->update(gpu->gpu_tot_sim_cycle, wallclock);
+      m_stream->record_next_done();
+    } break;
+    case stream_wait_event:
+      // only allows next op to go if event is done
+      // otherwise stays in the stream queue
+      printf("stream wait event processing...\n");
+      if (m_event->num_updates() >= m_cnt) {
+        printf("stream wait event done\n");
+        m_stream->record_next_done();
       } else {
-        if (m_kernel->m_launch_latency)
-          m_kernel->m_launch_latency--;
-        if (g_debug_execution >= 3)
-          printf("kernel %d: \'%s\', latency %u not ready to transfer to GPU "
-                 "hardware scheduler\n",
-                 m_kernel->get_uid(), m_kernel->name().c_str(),
-                 m_kernel->m_launch_latency);
         return false;
       }
-    }
-    break;
-  case stream_event: {
-    if (g_debug_execution >= 3)
-      printf("event update\n");
-    time_t wallclock = time((time_t *)NULL);
-    m_event->update(gpu_tot_sim_cycle, wallclock);
-    m_stream->record_next_done();
-  } break;
-  default:
-    abort();
+      break;
+    default:
+      abort();
   }
   m_done = true;
   fflush(stdout);
@@ -250,30 +270,32 @@ bool stream_operation::do_operation(gpgpu_sim *gpu) {
 void stream_operation::print(FILE *fp) const {
   fprintf(fp, " stream operation ");
   switch (m_type) {
-  case stream_event:
-    fprintf(fp, "event");
-    break;
-  case stream_kernel_launch:
-    fprintf(fp, "kernel");
-    break;
-  case stream_memcpy_device_to_device:
-    fprintf(fp, "memcpy device-to-device");
-    break;
-  case stream_memcpy_device_to_host:
-    fprintf(fp, "memcpy device-to-host");
-    break;
-  case stream_memcpy_host_to_device:
-    fprintf(fp, "memcpy host-to-device");
-    break;
-  case stream_memcpy_to_symbol:
-    fprintf(fp, "memcpy to symbol");
-    break;
-  case stream_memcpy_from_symbol:
-    fprintf(fp, "memcpy from symbol");
-    break;
-  case stream_no_op:
-    fprintf(fp, "no-op");
-    break;
+    case stream_event:
+      fprintf(fp, "event");
+      break;
+    case stream_kernel_launch:
+      fprintf(fp, "kernel");
+      break;
+    case stream_memcpy_device_to_device:
+      fprintf(fp, "memcpy device-to-device");
+      break;
+    case stream_memcpy_device_to_host:
+      fprintf(fp, "memcpy device-to-host");
+      break;
+    case stream_memcpy_host_to_device:
+      fprintf(fp, "memcpy host-to-device");
+      break;
+    case stream_memcpy_to_symbol:
+      fprintf(fp, "memcpy to symbol");
+      break;
+    case stream_memcpy_from_symbol:
+      fprintf(fp, "memcpy from symbol");
+      break;
+    case stream_no_op:
+      fprintf(fp, "no-op");
+      break;
+    default:
+      break;
   }
 }
 
@@ -282,6 +304,7 @@ stream_manager::stream_manager(gpgpu_sim *gpu, bool cuda_launch_blocking) {
   m_service_stream_zero = false;
   m_cuda_launch_blocking = cuda_launch_blocking;
   pthread_mutex_init(&m_lock, NULL);
+  m_last_stream = m_streams.begin();
 }
 
 bool stream_manager::operation(bool *sim) {
@@ -289,7 +312,7 @@ bool stream_manager::operation(bool *sim) {
   pthread_mutex_lock(&m_lock);
   //    if(check)m_gpu->print_stats();
   stream_operation op = front();
-  if (!op.do_operation(m_gpu)) // not ready to execute
+  if (!op.do_operation(m_gpu))  // not ready to execute
   {
     // cancel operation
     if (op.is_kernel()) {
@@ -334,9 +357,9 @@ bool stream_manager::register_finished_kernel(unsigned grid_uid) {
       //            kernel_stat.close();
       if (sim_prof_enable) {
         update_sim_prof_kernel(kernel->get_uid(),
-                               gpu_sim_cycle + gpu_tot_sim_cycle);
+                               m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
         m_gpu->getGmmu()->log_kernel_info(
-            kernel->get_uid(), gpu_sim_cycle + gpu_tot_sim_cycle, true);
+            kernel->get_uid(), m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle, true);
       }
 
       stream->record_next_done();
@@ -353,6 +376,14 @@ bool stream_manager::register_finished_kernel(unsigned grid_uid) {
 void stream_manager::stop_all_running_kernels() {
   pthread_mutex_lock(&m_lock);
 
+  std::vector<unsigned long long> finished_streams;
+  std::vector<kernel_info_t *> running_kernels = m_gpu->get_running_kernels();
+  for (kernel_info_t *k : running_kernels) {
+    if (k != NULL) {
+      finished_streams.push_back(k->get_streamID());
+    }
+  }
+
   // Signal m_gpu to stop all running kernels
   m_gpu->stop_all_running_kernels();
 
@@ -363,8 +394,9 @@ void stream_manager::stop_all_running_kernels() {
   }
 
   // If any kernels completed, print out the current stats
-  if (count > 0)
-    m_gpu->print_stats();
+  for (unsigned long long streamID : finished_streams) {
+    m_gpu->print_stats(streamID);
+  }
 
   pthread_mutex_unlock(&m_lock);
 }
@@ -385,10 +417,18 @@ stream_operation stream_manager::front() {
       m_service_stream_zero = false;
     }
   }
-
   if (!m_service_stream_zero) {
-    std::list<struct CUstream_st *>::iterator s;
-    for (s = m_streams.begin(); s != m_streams.end(); s++) {
+    std::list<struct CUstream_st *>::iterator s = m_last_stream;
+    if (m_last_stream == m_streams.end()) {
+      s = m_streams.begin();
+    } else {
+      s++;
+    }
+    for (size_t ii = 0; ii < m_streams.size(); ii++, s++) {
+      if (s == m_streams.end()) {
+        s = m_streams.begin();
+      }
+      m_last_stream = s;
       CUstream_st *stream = *s;
       if (!stream->busy() && !stream->empty()) {
         result = stream->next();
@@ -423,11 +463,13 @@ void stream_manager::destroy_stream(CUstream_st *stream) {
     }
   }
   delete stream;
+  m_last_stream = m_streams.begin();
   pthread_mutex_unlock(&m_lock);
 }
 
 bool stream_manager::concurrent_streams_empty() {
   bool result = true;
+  if (m_streams.empty()) return true;
   // called by gpu simulation thread
   std::list<struct CUstream_st *>::iterator s;
   for (s = m_streams.begin(); s != m_streams.end(); ++s) {
@@ -435,6 +477,7 @@ bool stream_manager::concurrent_streams_empty() {
     if (!stream->empty()) {
       // stream->print(stdout);
       result = false;
+      break;
     }
   }
   return result;
@@ -443,20 +486,16 @@ bool stream_manager::concurrent_streams_empty() {
 bool stream_manager::empty_protected() {
   bool result = true;
   pthread_mutex_lock(&m_lock);
-  if (!concurrent_streams_empty())
-    result = false;
-  if (!m_stream_zero.empty())
-    result = false;
+  if (!concurrent_streams_empty()) result = false;
+  if (!m_stream_zero.empty()) result = false;
   pthread_mutex_unlock(&m_lock);
   return result;
 }
 
 bool stream_manager::empty() {
   bool result = true;
-  if (!concurrent_streams_empty())
-    result = false;
-  if (!m_stream_zero.empty())
-    result = false;
+  if (!concurrent_streams_empty()) result = false;
+  if (!m_stream_zero.empty()) result = false;
   return result;
 }
 
@@ -470,11 +509,9 @@ void stream_manager::print_impl(FILE *fp) {
   std::list<struct CUstream_st *>::iterator s;
   for (s = m_streams.begin(); s != m_streams.end(); ++s) {
     struct CUstream_st *stream = *s;
-    if (!stream->empty())
-      stream->print(fp);
+    if (!stream->empty()) stream->print(fp);
   }
-  if (!m_stream_zero.empty())
-    m_stream_zero.print(fp);
+  if (!m_stream_zero.empty()) m_stream_zero.print(fp);
 }
 
 void stream_manager::push(stream_operation op) {
@@ -501,24 +538,32 @@ void stream_manager::push(stream_operation op) {
     }
   } else {
     // Otherwise, ignore operation and continue
-    printf("GPGPU-Sim API: Maximum cycle, instruction, or CTA count hit. "
-           "Skipping:");
+    printf(
+        "GPGPU-Sim API: Maximum cycle, instruction, or CTA count hit. "
+        "Skipping:");
     op.print(stdout);
     printf("\n");
   }
-  if (g_debug_execution >= 3)
-    print_impl(stdout);
+  if (g_debug_execution >= 3) print_impl(stdout);
   pthread_mutex_unlock(&m_lock);
-  if (m_cuda_launch_blocking || stream == NULL || op.is_kernel()) {
+  if (!m_gpu->is_SST_mode() && (m_cuda_launch_blocking || stream == NULL || op.is_kernel())) {
     unsigned int wait_amount = 100;
-    unsigned int wait_cap = 100000; // 100ms
+    unsigned int wait_cap = 100000;  // 100ms
     while (!empty()) {
       // sleep to prevent CPU hog by empty spin
       // sleep time increased exponentially ensure fast response when needed
       usleep(wait_amount);
       wait_amount *= 2;
-      if (wait_amount > wait_cap)
-        wait_amount = wait_cap;
+      if (wait_amount > wait_cap) wait_amount = wait_cap;
     }
+  }
+}
+
+void stream_manager::pushCudaStreamWaitEventToAllStreams(CUevent_st *e,
+                                                         unsigned int flags) {
+  std::list<CUstream_st *>::iterator s;
+  for (s = m_streams.begin(); s != m_streams.end(); s++) {
+    stream_operation op(*s, e, flags);
+    push(op);
   }
 }

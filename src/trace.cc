@@ -31,10 +31,10 @@
 
 namespace Trace {
 
-#define TS_TUP_BEGIN(X) const char *trace_streams_str[] = {
+#define TS_TUP_BEGIN(X) const char* trace_streams_str[] = {
 #define TS_TUP(X) #X
-#define TS_TUP_END(X)                                                          \
-  }                                                                            \
+#define TS_TUP_END(X) \
+  }                   \
   ;
 #include "trace_streams.tup"
 #undef TS_TUP_BEGIN
@@ -45,7 +45,7 @@ bool enabled = false;
 int sampling_core = 0;
 int sampling_memory_partition = -1;
 bool trace_streams_enabled[NUM_TRACE_STREAMS] = {false};
-const char *config_str;
+const char* config_str;
 
 void init() {
   for (unsigned i = 0; i < NUM_TRACE_STREAMS; ++i) {
@@ -54,4 +54,4 @@ void init() {
     }
   }
 }
-} // namespace Trace
+}  // namespace Trace

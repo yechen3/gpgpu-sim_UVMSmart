@@ -26,11 +26,11 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-#include "assert.h"
-#include <set>
 #include <stdio.h>
 #include <stdlib.h>
+#include <set>
 #include <vector>
+#include "assert.h"
 
 #ifndef SCOREBOARD_H_
 #define SCOREBOARD_H_
@@ -38,8 +38,8 @@
 #include "../abstract_hardware_model.h"
 
 class Scoreboard {
-public:
-  Scoreboard(unsigned sid, unsigned n_warps);
+ public:
+  Scoreboard(unsigned sid, unsigned n_warps, class gpgpu_t *gpu);
 
   void reserveRegisters(const warp_inst_t *inst);
   void releaseRegisters(const warp_inst_t *inst);
@@ -50,7 +50,7 @@ public:
   void printContents() const;
   const bool islongop(unsigned warp_id, unsigned regnum);
 
-private:
+ private:
   void reserveRegister(unsigned wid, unsigned regnum);
   int get_sid() const { return m_sid; }
 
@@ -58,9 +58,11 @@ private:
 
   // keeps track of pending writes to registers
   // indexed by warp id, reg_id => pending write count
-  std::vector<std::set<unsigned>> reg_table;
+  std::vector<std::set<unsigned> > reg_table;
   // Register that depend on a long operation (global, local or tex memory)
-  std::vector<std::set<unsigned>> longopregs;
+  std::vector<std::set<unsigned> > longopregs;
+
+  class gpgpu_t *m_gpu;
 };
 
 #endif /* SCOREBOARD_H_ */

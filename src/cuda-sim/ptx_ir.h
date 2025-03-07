@@ -44,8 +44,10 @@
 
 #include "memory.h"
 
+class gpgpu_context;
+
 class type_info_key {
-public:
+ public:
   type_info_key() {
     m_is_non_arch_reg = false;
     m_init = false;
@@ -96,11 +98,12 @@ public:
   bool is_tex() const { return m_space_spec == tex_space; }
   bool is_func_addr() const { return m_is_function ? true : false; }
   int scalar_type() const { return m_scalar_type_spec; }
+  int get_alignment_spec() const { return m_alignment_spec; }
   unsigned type_decode(size_t &size, int &t) const;
   static unsigned type_decode(int type, size_t &size, int &t);
   memory_space_t get_memory_space() const { return m_space_spec; }
 
-private:
+ private:
   bool m_init;
   memory_space_t m_space_spec;
   int m_scalar_type_spec;
@@ -111,7 +114,7 @@ private:
   int m_is_function;
   bool m_is_non_arch_reg;
 
-  friend class type_info_key_compare;
+  friend struct type_info_key_compare;
 };
 
 class symbol_table;
@@ -119,31 +122,24 @@ class symbol_table;
 struct type_info_key_compare {
   bool operator()(const type_info_key &a, const type_info_key &b) const {
     assert(a.m_init && b.m_init);
-    if (a.m_space_spec < b.m_space_spec)
-      return true;
-    if (a.m_scalar_type_spec < b.m_scalar_type_spec)
-      return true;
-    if (a.m_vector_spec < b.m_vector_spec)
-      return true;
-    if (a.m_alignment_spec < b.m_alignment_spec)
-      return true;
-    if (a.m_extern_spec < b.m_extern_spec)
-      return true;
-    if (a.m_array_dim < b.m_array_dim)
-      return true;
-    if (a.m_is_function < b.m_is_function)
-      return true;
+    if (a.m_space_spec < b.m_space_spec) return true;
+    if (a.m_scalar_type_spec < b.m_scalar_type_spec) return true;
+    if (a.m_vector_spec < b.m_vector_spec) return true;
+    if (a.m_alignment_spec < b.m_alignment_spec) return true;
+    if (a.m_extern_spec < b.m_extern_spec) return true;
+    if (a.m_array_dim < b.m_array_dim) return true;
+    if (a.m_is_function < b.m_is_function) return true;
 
     return false;
   }
 };
 
 class type_info {
-public:
+ public:
   type_info(symbol_table *scope, type_info_key t) { m_type_info = t; }
   const type_info_key &get_key() const { return m_type_info; }
 
-private:
+ private:
   symbol_table *m_scope;
   type_info_key m_type_info;
 };
@@ -171,9 +167,10 @@ enum operand_type {
 class operand_info;
 
 class symbol {
-public:
+ public:
   symbol(const char *name, const type_info *type, const char *location,
-         unsigned size) {
+         unsigned size, gpgpu_context *ctx) {
+    gpgpu_ctx = ctx;
     m_uid = get_uid();
     m_name = name;
     m_decl_location = location;
@@ -186,6 +183,7 @@ public:
     m_is_global = false;
     m_is_local = false;
     m_is_param_local = false;
+    m_is_param_kernel = false;
     m_is_tex = false;
     m_is_func_addr = false;
     m_reg_num_valid = false;
@@ -194,28 +192,23 @@ public:
     m_arch_reg_num = (unsigned)-1;
     m_address = (unsigned)-1;
     m_initializer.clear();
-    if (type)
-      m_is_shared = type->get_key().is_shared();
-    if (type)
-      m_is_const = type->get_key().is_const();
-    if (type)
-      m_is_global = type->get_key().is_global();
-    if (type)
-      m_is_local = type->get_key().is_local();
-    if (type)
-      m_is_param_local = type->get_key().is_param_local();
-    if (type)
-      m_is_tex = type->get_key().is_tex();
-    if (type)
-      m_is_func_addr = type->get_key().is_func_addr();
+    if (type) m_is_shared = type->get_key().is_shared();
+    if (type) m_is_const = type->get_key().is_const();
+    if (type) m_is_global = type->get_key().is_global();
+    if (type) m_is_local = type->get_key().is_local();
+    if (type) m_is_param_local = type->get_key().is_param_local();
+    if (type) m_is_param_kernel = type->get_key().is_param_kernel();
+    if (type) m_is_tex = type->get_key().is_tex();
+    if (type) m_is_func_addr = type->get_key().is_func_addr();
   }
   unsigned get_size_in_bytes() const { return m_size; }
   const std::string &name() const { return m_name; }
   const std::string &decl_location() const { return m_decl_location; }
   const type_info *type() const { return m_type; }
+  bool has_valid_address() const { return m_address_valid; }
   addr_t get_address() const {
     assert(m_is_label ||
-           !m_type->get_key().is_reg()); // todo : other assertions
+           !m_type->get_key().is_reg());  // todo : other assertions
     assert(m_address_valid);
     return m_address;
   }
@@ -242,10 +235,12 @@ public:
 
   bool is_label() const { return m_is_label; }
   bool is_shared() const { return m_is_shared; }
+  bool is_sstarr() const { return m_is_sstarr; }
   bool is_const() const { return m_is_const; }
   bool is_global() const { return m_is_global; }
   bool is_local() const { return m_is_local; }
   bool is_param_local() const { return m_is_param_local; }
+  bool is_param_kernel() const { return m_is_param_kernel; }
   bool is_tex() const { return m_is_tex; }
   bool is_func_addr() const { return m_is_func_addr; }
   bool is_reg() const {
@@ -275,24 +270,27 @@ public:
   void print_info(FILE *fp) const;
   unsigned uid() const { return m_uid; }
 
-private:
+ private:
+  gpgpu_context *gpgpu_ctx;
   unsigned get_uid();
   unsigned m_uid;
   const type_info *m_type;
-  unsigned m_size; // in bytes
+  unsigned m_size;  // in bytes
   std::string m_name;
   std::string m_decl_location;
 
   unsigned m_address;
-  function_info *m_function; // used for function symbols
+  function_info *m_function;  // used for function symbols
 
   bool m_address_valid;
   bool m_is_label;
   bool m_is_shared;
+  bool m_is_sstarr;
   bool m_is_const;
   bool m_is_global;
   bool m_is_local;
   bool m_is_param_local;
+  bool m_is_param_kernel;
   bool m_is_tex;
   bool m_is_func_addr;
   unsigned m_reg_num;
@@ -300,20 +298,20 @@ private:
   bool m_reg_num_valid;
 
   std::list<operand_info> m_initializer;
-  static unsigned sm_next_uid;
 };
 
 class symbol_table {
-public:
+ public:
   symbol_table();
   symbol_table(const char *scope_name, unsigned entry_point,
-               symbol_table *parent);
+               symbol_table *parent, gpgpu_context *ctx);
   void set_name(const char *name);
   const ptx_version &get_ptx_version() const;
   unsigned get_sm_target() const;
   void set_ptx_version(float ver, unsigned ext);
   void set_sm_target(const char *target, const char *ext, const char *ext2);
   symbol *lookup(const char *identifier);
+  symbol *lookup_by_addr(addr_t addr);
   std::string get_scope_name() const { return m_scope_name; }
   symbol *add_variable(const char *identifier, const type_info *type,
                        unsigned size, const char *filename, unsigned line);
@@ -322,6 +320,7 @@ public:
   bool add_function_decl(const char *name, int entry_point,
                          function_info **func_info,
                          symbol_table **symbol_table);
+  function_info *lookup_function(std::string name);
   type_info *add_type(memory_space_t space_spec, int scalar_type_spec,
                       int vector_spec, int alignment_spec, int extern_spec);
   type_info *add_type(function_info *func);
@@ -329,10 +328,12 @@ public:
   void set_label_address(const symbol *label, unsigned addr);
   unsigned next_reg_num() { return ++m_reg_allocator; }
   addr_t get_shared_next() { return m_shared_next; }
+  addr_t get_sstarr_next() { return m_sstarr_next; }
   addr_t get_global_next() { return m_global_next; }
   addr_t get_local_next() { return m_local_next; }
   addr_t get_tex_next() { return m_tex_next; }
   void alloc_shared(unsigned num_bytes) { m_shared_next += num_bytes; }
+  void alloc_sstarr(unsigned num_bytes) { m_sstarr_next += num_bytes; }
   void alloc_global(unsigned num_bytes) { m_global_next += num_bytes; }
   void alloc_local(unsigned num_bytes) { m_local_next += num_bytes; }
   void alloc_tex(unsigned num_bytes) { m_tex_next += num_bytes; }
@@ -351,9 +352,13 @@ public:
   symbol_table *start_inst_group();
   symbol_table *end_inst_group();
 
-private:
+  // backward pointer
+  class gpgpu_context *gpgpu_ctx;
+
+ private:
   unsigned m_reg_allocator;
   unsigned m_shared_next;
+  unsigned m_sstarr_next;
   unsigned m_const_next;
   unsigned m_global_next;
   unsigned m_local_next;
@@ -363,7 +368,7 @@ private:
   ptx_version m_ptx_version;
   std::string m_scope_name;
   std::map<std::string, symbol *>
-      m_symbols; // map from name of register to pointers to the registers
+      m_symbols;  // map from name of register to pointers to the registers
   std::map<type_info_key, type_info *, type_info_key_compare> m_types;
   std::list<symbol *> m_globals;
   std::list<symbol *> m_consts;
@@ -376,9 +381,9 @@ private:
 };
 
 class operand_info {
-public:
-  operand_info() {
-    init();
+ public:
+  operand_info(gpgpu_context *ctx) {
+    init(ctx);
     m_is_non_arch_reg = false;
     m_addr_space = undefined_space;
     m_operand_lohi = 0;
@@ -391,8 +396,8 @@ public:
     m_addr_offset = 0;
     m_value.m_symbolic = NULL;
   }
-  operand_info(const symbol *addr) {
-    init();
+  operand_info(const symbol *addr, gpgpu_context *ctx) {
+    init(ctx);
     m_is_non_arch_reg = false;
     m_addr_space = undefined_space;
     m_operand_lohi = 0;
@@ -413,6 +418,8 @@ public:
       m_type = symbolic_t;
     } else if (addr->is_param_local()) {
       m_type = symbolic_t;
+    } else if (addr->is_param_kernel()) {
+      m_type = symbolic_t;
     } else if (addr->is_tex()) {
       m_type = symbolic_t;
     } else if (addr->is_func_addr()) {
@@ -431,8 +438,8 @@ public:
     m_is_return_var = false;
     m_immediate_address = false;
   }
-  operand_info(const symbol *addr1, const symbol *addr2) {
-    init();
+  operand_info(const symbol *addr1, const symbol *addr2, gpgpu_context *ctx) {
+    init(ctx);
     m_is_non_arch_reg = false;
     m_addr_space = undefined_space;
     m_operand_lohi = 0;
@@ -442,19 +449,23 @@ public:
     m_uid = get_uid();
     m_valid = true;
     m_type = memory_t;
-    m_value.m_vector_symbolic = new const symbol *[4];
+    m_value.m_vector_symbolic = new const symbol *[8];
     m_value.m_vector_symbolic[0] = addr1;
     m_value.m_vector_symbolic[1] = addr2;
     m_value.m_vector_symbolic[2] = NULL;
     m_value.m_vector_symbolic[3] = NULL;
+    m_value.m_vector_symbolic[4] = NULL;
+    m_value.m_vector_symbolic[5] = NULL;
+    m_value.m_vector_symbolic[6] = NULL;
+    m_value.m_vector_symbolic[7] = NULL;
     m_addr_offset = 0;
     m_vector = false;
     m_neg_pred = false;
     m_is_return_var = false;
     m_immediate_address = false;
   }
-  operand_info(int builtin_id, int dim_mod) {
-    init();
+  operand_info(int builtin_id, int dim_mod, gpgpu_context *ctx) {
+    init(ctx);
     m_is_non_arch_reg = false;
     m_addr_space = undefined_space;
     m_operand_lohi = 0;
@@ -471,8 +482,8 @@ public:
     m_is_return_var = false;
     m_immediate_address = false;
   }
-  operand_info(const symbol *addr, int offset) {
-    init();
+  operand_info(const symbol *addr, int offset, gpgpu_context *ctx) {
+    init(ctx);
     m_is_non_arch_reg = false;
     m_addr_space = undefined_space;
     m_operand_lohi = 0;
@@ -489,8 +500,8 @@ public:
     m_is_return_var = false;
     m_immediate_address = false;
   }
-  operand_info(unsigned x) {
-    init();
+  operand_info(unsigned x, gpgpu_context *ctx) {
+    init(ctx);
     m_is_non_arch_reg = false;
     m_addr_space = undefined_space;
     m_operand_lohi = 0;
@@ -507,8 +518,8 @@ public:
     m_is_return_var = false;
     m_immediate_address = true;
   }
-  operand_info(int x) {
-    init();
+  operand_info(int x, gpgpu_context *ctx) {
+    init(ctx);
     m_is_non_arch_reg = false;
     m_addr_space = undefined_space;
     m_operand_lohi = 0;
@@ -525,8 +536,8 @@ public:
     m_is_return_var = false;
     m_immediate_address = false;
   }
-  operand_info(float x) {
-    init();
+  operand_info(float x, gpgpu_context *ctx) {
+    init(ctx);
     m_is_non_arch_reg = false;
     m_addr_space = undefined_space;
     m_operand_lohi = 0;
@@ -543,8 +554,8 @@ public:
     m_is_return_var = false;
     m_immediate_address = false;
   }
-  operand_info(double x) {
-    init();
+  operand_info(double x, gpgpu_context *ctx) {
+    init(ctx);
     m_is_non_arch_reg = false;
     m_addr_space = undefined_space;
     m_operand_lohi = 0;
@@ -562,8 +573,8 @@ public:
     m_immediate_address = false;
   }
   operand_info(const symbol *s1, const symbol *s2, const symbol *s3,
-               const symbol *s4) {
-    init();
+               const symbol *s4, gpgpu_context *ctx) {
+    init(ctx);
     m_is_non_arch_reg = false;
     m_addr_space = undefined_space;
     m_operand_lohi = 0;
@@ -574,17 +585,51 @@ public:
     m_valid = true;
     m_vector = true;
     m_type = vector_t;
-    m_value.m_vector_symbolic = new const symbol *[4];
+    m_value.m_vector_symbolic = new const symbol *[8];
     m_value.m_vector_symbolic[0] = s1;
     m_value.m_vector_symbolic[1] = s2;
     m_value.m_vector_symbolic[2] = s3;
     m_value.m_vector_symbolic[3] = s4;
+    m_value.m_vector_symbolic[4] = NULL;
+    m_value.m_vector_symbolic[5] = NULL;
+    m_value.m_vector_symbolic[6] = NULL;
+    m_value.m_vector_symbolic[7] = NULL;
     m_addr_offset = 0;
     m_neg_pred = false;
     m_is_return_var = false;
     m_immediate_address = false;
   }
-  void init() {
+  operand_info(const symbol *s1, const symbol *s2, const symbol *s3,
+               const symbol *s4, const symbol *s5, const symbol *s6,
+               const symbol *s7, const symbol *s8, gpgpu_context *ctx) {
+    init(ctx);
+    m_is_non_arch_reg = false;
+    m_addr_space = undefined_space;
+    m_operand_lohi = 0;
+    m_double_operand_type = 0;
+    m_operand_neg = false;
+    m_const_mem_offset = 0;
+    m_uid = get_uid();
+    m_valid = true;
+    m_vector = true;
+    m_type = vector_t;
+    m_value.m_vector_symbolic = new const symbol *[8];
+    m_value.m_vector_symbolic[0] = s1;
+    m_value.m_vector_symbolic[1] = s2;
+    m_value.m_vector_symbolic[2] = s3;
+    m_value.m_vector_symbolic[3] = s4;
+    m_value.m_vector_symbolic[4] = s5;
+    m_value.m_vector_symbolic[5] = s6;
+    m_value.m_vector_symbolic[6] = s7;
+    m_value.m_vector_symbolic[7] = s8;
+    m_addr_offset = 0;
+    m_neg_pred = false;
+    m_is_return_var = false;
+    m_immediate_address = false;
+  }
+
+  void init(gpgpu_context *ctx) {
+    gpgpu_ctx = ctx;
     m_uid = (unsigned)-1;
     m_valid = false;
     m_vector = false;
@@ -623,19 +668,19 @@ public:
 
   unsigned get_vect_nelem() const {
     assert(is_vector());
-    if (!m_value.m_vector_symbolic[0])
-      return 0;
-    if (!m_value.m_vector_symbolic[1])
-      return 1;
-    if (!m_value.m_vector_symbolic[2])
-      return 2;
-    if (!m_value.m_vector_symbolic[3])
-      return 3;
-    return 4;
+    if (!m_value.m_vector_symbolic[0]) return 0;
+    if (!m_value.m_vector_symbolic[1]) return 1;
+    if (!m_value.m_vector_symbolic[2]) return 2;
+    if (!m_value.m_vector_symbolic[3]) return 3;
+    if (!m_value.m_vector_symbolic[4]) return 4;
+    if (!m_value.m_vector_symbolic[5]) return 5;
+    if (!m_value.m_vector_symbolic[6]) return 6;
+    if (!m_value.m_vector_symbolic[7]) return 7;
+    return 8;
   }
 
   const symbol *vec_symbol(int idx) const {
-    assert(idx < 4);
+    assert(idx < 8);
     const symbol *result = m_value.m_vector_symbolic[idx];
     assert(result != NULL);
     return result;
@@ -671,14 +716,17 @@ public:
     return m_value.m_symbolic->type()->get_key().is_reg();
   }
   bool is_param_local() const {
-    if (m_type != symbolic_t)
-      return false;
+    if (m_type != symbolic_t) return false;
     return m_value.m_symbolic->type()->get_key().is_param_local();
   }
 
+  bool is_param_kernel() const {
+    if (m_type != symbolic_t) return false;
+    return m_value.m_symbolic->type()->get_key().is_param_kernel();
+  }
+
   bool is_vector() const {
-    if (m_vector)
-      return true;
+    if (m_vector) return true;
     return false;
   }
   int reg_num() const { return m_value.m_symbolic->reg_num(); }
@@ -692,6 +740,26 @@ public:
   int reg4_num() const {
     return m_value.m_vector_symbolic[3]
                ? m_value.m_vector_symbolic[3]->reg_num()
+               : 0;
+  }
+  int reg5_num() const {
+    return m_value.m_vector_symbolic[4]
+               ? m_value.m_vector_symbolic[4]->reg_num()
+               : 0;
+  }
+  int reg6_num() const {
+    return m_value.m_vector_symbolic[5]
+               ? m_value.m_vector_symbolic[5]->reg_num()
+               : 0;
+  }
+  int reg7_num() const {
+    return m_value.m_vector_symbolic[6]
+               ? m_value.m_vector_symbolic[6]->reg_num()
+               : 0;
+  }
+  int reg8_num() const {
+    return m_value.m_vector_symbolic[7]
+               ? m_value.m_vector_symbolic[7]->reg_num()
                : 0;
   }
   int arch_reg_num() const { return m_value.m_symbolic->arch_reg_num(); }
@@ -723,6 +791,7 @@ public:
     }
     return m_value.m_symbolic->is_shared();
   }
+  bool is_sstarr() const { return m_value.m_symbolic->is_sstarr(); }
   bool is_const() const { return m_value.m_symbolic->is_const(); }
   bool is_global() const { return m_value.m_symbolic->is_global(); }
   bool is_local() const { return m_value.m_symbolic->is_local(); }
@@ -739,21 +808,21 @@ public:
   ptx_reg_t get_literal_value() const {
     ptx_reg_t result;
     switch (m_type) {
-    case int_t:
-      result.s32 = m_value.m_int;
-      break;
-    case float_op_t:
-      result.f32 = m_value.m_float;
-      break;
-    case double_op_t:
-      result.f64 = m_value.m_double;
-      break;
-    case unsigned_t:
-      result.u32 = m_value.m_unsigned;
-      break;
-    default:
-      assert(0);
-      break;
+      case int_t:
+        result.s64 = m_value.m_int;
+        break;
+      case float_op_t:
+        result.f32 = m_value.m_float;
+        break;
+      case double_op_t:
+        result.f64 = m_value.m_double;
+        break;
+      case unsigned_t:
+        result.u32 = m_value.m_unsigned;
+        break;
+      default:
+        assert(0);
+        break;
     }
     return result;
   }
@@ -787,7 +856,8 @@ public:
   addr_t get_const_mem_offset() const { return m_const_mem_offset; }
   bool is_non_arch_reg() const { return m_is_non_arch_reg; }
 
-private:
+ private:
+  gpgpu_context *gpgpu_ctx;
   unsigned m_uid;
   bool m_valid;
   bool m_vector;
@@ -817,12 +887,10 @@ private:
   bool m_is_return_var;
   bool m_is_non_arch_reg;
 
-  static unsigned sm_next_uid;
   unsigned get_uid();
 };
 
 extern const char *g_opcode_string[];
-extern unsigned g_num_ptx_inst_uid;
 struct basic_block_t {
   basic_block_t(unsigned ID, ptx_instruction *begin, ptx_instruction *end,
                 bool entry, bool ex) {
@@ -838,7 +906,7 @@ struct basic_block_t {
   ptx_instruction *ptx_begin;
   ptx_instruction *ptx_end;
   std::set<int>
-      predecessor_ids; // indices of other basic blocks in m_basic_blocks array
+      predecessor_ids;  // indices of other basic blocks in m_basic_blocks array
   std::set<int> successor_ids;
   std::set<int> postdominator_ids;
   std::set<int> dominator_ids;
@@ -869,13 +937,14 @@ struct gpgpu_recon_t {
 };
 
 class ptx_instruction : public warp_inst_t {
-public:
+ public:
   ptx_instruction(int opcode, const symbol *pred, int neg_pred, int pred_mod,
                   symbol *label, const std::list<operand_info> &operands,
                   const operand_info &return_var, const std::list<int> &options,
+                  const std::list<int> &wmma_options,
                   const std::list<int> &scalar_type, memory_space_t space_spec,
                   const char *file, unsigned line, const char *source,
-                  const core_config *config);
+                  const core_config *config, gpgpu_context *ctx);
 
   void print_insn() const;
   virtual void print_insn(FILE *fp) const;
@@ -894,10 +963,13 @@ public:
   unsigned source_line() const { return m_source_line; }
   unsigned get_num_operands() const { return m_operands.size(); }
   bool has_pred() const { return m_pred != NULL; }
-  operand_info get_pred() const { return operand_info(m_pred); }
+  operand_info get_pred() const;
   bool get_pred_neg() const { return m_neg_pred; }
   int get_pred_mod() const { return m_pred_mod; }
   const char *get_source() const { return m_source.c_str(); }
+
+  const std::list<int> get_scalar_type() const { return m_scalar_type; }
+  const std::list<int> get_options() const { return m_options; }
 
   typedef std::vector<operand_info>::const_iterator const_iterator;
 
@@ -939,6 +1011,26 @@ public:
     assert(m_operands.size() > 3);
     return m_operands[3];
   }
+  const operand_info &src4() const {
+    assert(m_operands.size() > 4);
+    return m_operands[4];
+  }
+  const operand_info &src5() const {
+    assert(m_operands.size() > 5);
+    return m_operands[5];
+  }
+  const operand_info &src6() const {
+    assert(m_operands.size() > 6);
+    return m_operands[6];
+  }
+  const operand_info &src7() const {
+    assert(m_operands.size() > 7);
+    return m_operands[7];
+  }
+  const operand_info &src8() const {
+    assert(m_operands.size() > 8);
+    return m_operands[8];
+  }
 
   const operand_info &operand_lookup(unsigned n) const {
     assert(n < m_operands.size());
@@ -950,6 +1042,10 @@ public:
   unsigned get_vector() const { return m_vector_spec; }
   unsigned get_atomic() const { return m_atomic_spec; }
 
+  int get_wmma_type() const { return m_wmma_type; }
+  int get_wmma_layout(int index) const {
+    return m_wmma_layout[index];  // 0->Matrix D,1->Matrix C
+  }
   int get_type() const {
     assert(!m_scalar_type.empty());
     return m_scalar_type.front();
@@ -960,8 +1056,8 @@ public:
     return m_scalar_type.back();
   }
 
-  void
-  assign_bb(basic_block_t *basic_block) // assign instruction to a basic block
+  void assign_bb(
+      basic_block_t *basic_block)  // assign instruction to a basic block
   {
     m_basic_block = basic_block;
   }
@@ -991,41 +1087,44 @@ public:
   unsigned cache_option() const { return m_cache_option; }
   unsigned rounding_mode() const { return m_rounding_mode; }
   unsigned saturation_mode() const { return m_saturation_mode; }
+  unsigned clamp_mode() const { return m_clamp_mode; }
+  unsigned left_mode() const { return m_left_mode; }
   unsigned dimension() const { return m_geom_spec; }
   unsigned barrier_op() const { return m_barrier_op; }
   unsigned shfl_op() const { return m_shfl_op; }
+  unsigned prmt_op() const { return m_prmt_op; }
   enum vote_mode_t { vote_any, vote_all, vote_uni, vote_ballot };
   enum vote_mode_t vote_mode() const { return m_vote_mode; }
 
   int membar_level() const { return m_membar_level; }
 
   bool has_memory_read() const {
-    if (m_opcode == LD_OP || m_opcode == LDU_OP || m_opcode == TEX_OP)
+    if (m_opcode == LD_OP || m_opcode == LDU_OP || m_opcode == TEX_OP ||
+        m_opcode == MMA_LD_OP)
       return true;
     // Check PTXPlus operand type below
     // Source operands are memory operands
     ptx_instruction::const_iterator op = op_iter_begin();
-    for (int n = 0; op != op_iter_end(); op++, n++) { // process operands
-      if (n > 0 && op->is_memory_operand2())          // source operands only
+    for (int n = 0; op != op_iter_end(); op++, n++) {  // process operands
+      if (n > 0 && op->is_memory_operand2())           // source operands only
         return true;
     }
     return false;
   }
   bool has_memory_write() const {
-    if (m_opcode == ST_OP)
-      return true;
+    if (m_opcode == ST_OP || m_opcode == MMA_ST_OP) return true;
     // Check PTXPlus operand type below
     // Destination operand is a memory operand
     ptx_instruction::const_iterator op = op_iter_begin();
     for (int n = 0; (op != op_iter_end() && n < 1);
-         op++, n++) {                         // process operands
-      if (n == 0 && op->is_memory_operand2()) // source operands only
+         op++, n++) {                          // process operands
+      if (n == 0 && op->is_memory_operand2())  // source operands only
         return true;
     }
     return false;
   }
 
-private:
+ private:
   void set_opcode_and_latency();
   void set_bar_type();
   void set_fp_or_int_archop();
@@ -1047,21 +1146,28 @@ private:
   operand_info m_return_var;
 
   std::list<int> m_options;
+  std::list<int> m_wmma_options;
   bool m_wide;
   bool m_hi;
   bool m_lo;
   bool m_exit;
   bool m_abs;
   bool m_neg;
-  bool m_uni; // if branch instruction, this evaluates to true for uniform
-              // branches (ie jumps)
+  bool m_uni;  // if branch instruction, this evaluates to true for uniform
+               // branches (ie jumps)
   bool m_to_option;
   unsigned m_cache_option;
+  int m_wmma_type;
+  int m_wmma_layout[2];
+  int m_wmma_configuration;
   unsigned m_rounding_mode;
   unsigned m_compare_op;
   unsigned m_saturation_mode;
+  unsigned m_clamp_mode;
+  unsigned m_left_mode;
   unsigned m_barrier_op;
   unsigned m_shfl_op;
+  unsigned m_prmt_op;
 
   std::list<int> m_scalar_type;
   memory_space_t m_space_spec;
@@ -1070,16 +1176,17 @@ private:
   int m_atomic_spec;
   enum vote_mode_t m_vote_mode;
   int m_membar_level;
-  int m_instr_mem_index; // index into m_instr_mem array
-  unsigned m_inst_size;  // bytes
+  int m_instr_mem_index;  // index into m_instr_mem array
+  unsigned m_inst_size;   // bytes
 
   virtual void pre_decode();
   friend class function_info;
-  static unsigned g_num_ptx_inst_uid;
+  // backward pointer
+  class gpgpu_context *gpgpu_ctx;
 };
 
 class param_info {
-public:
+ public:
   param_info() {
     m_valid = false;
     m_value_set = false;
@@ -1098,8 +1205,8 @@ public:
   }
   void add_data(param_t v) {
     assert((!m_value_set) ||
-           (m_value.size == v.size)); // if this fails concurrent kernel
-                                      // launches might execute incorrectly
+           (m_value.size == v.size));  // if this fails concurrent kernel
+                                       // launches might execute incorrectly
     m_value_set = true;
     m_value = v;
   }
@@ -1129,7 +1236,7 @@ public:
     return (m_is_ptr and m_ptr_space == shared_space);
   }
 
-private:
+ private:
   bool m_valid;
   std::string m_name;
   int m_type;
@@ -1142,11 +1249,12 @@ private:
 };
 
 class function_info {
-public:
-  function_info(int entry_point);
+ public:
+  function_info(int entry_point, gpgpu_context *ctx);
   const ptx_version &get_ptx_version() const {
     return m_symtab->get_ptx_version();
   }
+  virtual ~function_info() {}
   unsigned get_sm_target() const { return m_symtab->get_sm_target(); }
   bool is_extern() const { return m_extern; }
   void set_name(const char *name) { m_name = name; }
@@ -1157,8 +1265,8 @@ public:
   void add_inst(const std::list<ptx_instruction *> &instructions) {
     m_instructions = instructions;
   }
-  std::list<ptx_instruction *>::iterator
-  find_next_real_instruction(std::list<ptx_instruction *>::iterator i);
+  std::list<ptx_instruction *>::iterator find_next_real_instruction(
+      std::list<ptx_instruction *>::iterator i);
   void create_basic_blocks();
 
   void print_basic_blocks();
@@ -1167,11 +1275,11 @@ public:
   void print_basic_block_dot();
 
   operand_info *find_break_target(
-      ptx_instruction *p_break_insn); // find the target of a break instruction
-  void connect_basic_blocks(); // iterate across m_basic_blocks of function,
-                               // connecting basic blocks together
+      ptx_instruction *p_break_insn);  // find the target of a break instruction
+  void connect_basic_blocks();  // iterate across m_basic_blocks of function,
+                                // connecting basic blocks together
   bool
-  connect_break_targets(); // connecting break instructions with proper targets
+  connect_break_targets();  // connecting break instructions with proper targets
 
   // iterate across m_basic_blocks of function,
   // finding dominator blocks, using algorithm of
@@ -1192,6 +1300,7 @@ public:
   // Muchnick's Adv. Compiler Design & Implemmntation Fig 7.15
   void find_ipostdominators();
   void print_ipostdominators();
+  void do_pdom();  // function to call pdom analysis
 
   unsigned get_num_reconvergence_pairs();
 
@@ -1225,8 +1334,7 @@ public:
   const symbol *get_return_var() const { return m_return_var_sym; }
   const ptx_instruction *get_instruction(unsigned PC) const {
     unsigned index = PC - m_start_PC;
-    if (index < m_instr_mem_size)
-      return m_instr_mem[index];
+    if (index < m_instr_mem_size) return m_instr_mem[index];
     return NULL;
   }
   addr_t get_start_PC() const { return m_start_PC; }
@@ -1234,71 +1342,103 @@ public:
   void finalize(memory_space *param_mem);
   void param_to_shared(memory_space *shared_mem, symbol_table *symtab);
   void list_param(FILE *fout) const;
+  void ptx_jit_config(std::map<unsigned long long, size_t> mallocPtr_Size,
+                      memory_space *param_mem, gpgpu_t *gpu, dim3 gridDim,
+                      dim3 blockDim);
 
-  const struct gpgpu_ptx_sim_info *get_kernel_info() const {
+  virtual const struct gpgpu_ptx_sim_info *get_kernel_info() const {
+    assert(m_kernel_info.maxthreads == maxnt_id);
     return &m_kernel_info;
   }
 
-  const void set_kernel_info(const struct gpgpu_ptx_sim_info &info) {
+  virtual const void set_kernel_info(const struct gpgpu_ptx_sim_info &info) {
     m_kernel_info = info;
     m_kernel_info.ptx_version = 10 * get_ptx_version().ver();
     m_kernel_info.sm_target = get_ptx_version().target();
+    // THIS DEPENDS ON ptxas being called after the PTX is parsed.
+    m_kernel_info.maxthreads = maxnt_id;
   }
   symbol_table *get_symtab() { return m_symtab; }
 
-  static const ptx_instruction *pc_to_instruction(unsigned pc) {
-    if (pc < s_g_pc_to_insn.size())
-      return s_g_pc_to_insn[pc];
-    else
-      return NULL;
-  }
   unsigned local_mem_framesize() const { return m_local_mem_framesize; }
   void set_framesize(unsigned sz) { m_local_mem_framesize = sz; }
   bool is_entry_point() const { return m_entry_point; }
+  bool is_pdom_set() const { return pdom_done; }  // return pdom flag
+  void set_pdom() { pdom_done = true; }           // set pdom flag
 
-private:
+  void add_config_param(size_t size, unsigned alignment) {
+    unsigned offset = 0;
+    if (m_param_configs.size() > 0) {
+      unsigned offset_nom =
+          m_param_configs.back().first + m_param_configs.back().second;
+      // ensure offset matches alignment requirements
+      offset = offset_nom % alignment ? (offset_nom / alignment + 1) * alignment
+                                      : offset_nom;
+    }
+    m_param_configs.push_back(std::pair<size_t, unsigned>(size, offset));
+  }
+
+  std::pair<size_t, unsigned> get_param_config(unsigned param_num) const {
+    return m_param_configs[param_num];
+  }
+
+  void set_maxnt_id(unsigned maxthreads) { maxnt_id = maxthreads; }
+  unsigned get_maxnt_id() { return maxnt_id; }
+  // backward pointer
+  class gpgpu_context *gpgpu_ctx;
+
+ protected:
+  // Registers/shmem/etc. used (from ptxas -v), loaded from ___.ptxinfo along
+  // with ___.ptx
+  struct gpgpu_ptx_sim_info m_kernel_info;
+
+ private:
+  unsigned maxnt_id;
   unsigned m_uid;
   unsigned m_local_mem_framesize;
   bool m_entry_point;
   bool m_extern;
   bool m_assembled;
+  bool pdom_done;  // flag to check whether pdom is completed or not
   std::string m_name;
   ptx_instruction **m_instr_mem;
   unsigned m_start_PC;
   unsigned m_instr_mem_size;
   std::map<std::string, param_t> m_kernel_params;
   std::map<unsigned, param_info> m_ptx_kernel_param_info;
+  std::vector<std::pair<size_t, unsigned> > m_param_configs;
   const symbol *m_return_var_sym;
   std::vector<const symbol *> m_args;
   std::list<ptx_instruction *> m_instructions;
   std::vector<basic_block_t *> m_basic_blocks;
-  std::list<std::pair<unsigned, unsigned>> m_back_edges;
+  std::list<std::pair<unsigned, unsigned> > m_back_edges;
   std::map<std::string, unsigned> labels;
   unsigned num_reconvergence_pairs;
 
   // Registers/shmem/etc. used (from ptxas -v), loaded from ___.ptxinfo along
   // with ___.ptx
-  struct gpgpu_ptx_sim_info m_kernel_info;
+  // with ___.ptx
 
   symbol_table *m_symtab;
 
-  static std::vector<ptx_instruction *>
-      s_g_pc_to_insn; // a direct mapping from PC to instruction
-  static unsigned sm_next_uid;
-
   // parameter size for device kernels
   int m_args_aligned_size;
+
+  addr_t m_n;  // offset in m_instr_mem (used in do_pdom)
 };
 
 class arg_buffer_t {
-public:
-  arg_buffer_t() {
+ public:
+  arg_buffer_t(gpgpu_context *ctx) : m_src_op(ctx) {
     m_is_reg = false;
     m_is_param = false;
     m_param_value = NULL;
     m_reg_value = ptx_reg_t();
   }
-  arg_buffer_t(const arg_buffer_t &another) { make_copy(another); }
+  arg_buffer_t(const arg_buffer_t &another, gpgpu_context *ctx)
+      : m_src_op(ctx) {
+    make_copy(another);
+  }
   void make_copy(const arg_buffer_t &another) {
     m_dst = another.m_dst;
     m_src_op = another.m_src_op;
@@ -1313,8 +1453,7 @@ public:
   }
   void operator=(const arg_buffer_t &another) { make_copy(another); }
   ~arg_buffer_t() {
-    if (m_is_param)
-      free(m_param_value);
+    if (m_is_param) free(m_param_value);
   }
   arg_buffer_t(const symbol *dst_sym, const operand_info &src_op,
                ptx_reg_t source_value)
@@ -1345,22 +1484,23 @@ public:
       assert(src_op.is_param_local());
       assert(dst_sym->get_size_in_bytes() == array_size);
       switch (array_size) {
-      case 1:
-        m_reg_value.u8 = *(unsigned char *)source_param_value_array;
-        break;
-      case 2:
-        m_reg_value.u16 = *(unsigned short *)source_param_value_array;
-        break;
-      case 4:
-        m_reg_value.u32 = *(unsigned int *)source_param_value_array;
-        break;
-      case 8:
-        m_reg_value.u64 = *(unsigned long long *)source_param_value_array;
-        break;
-      default:
-        printf("GPGPU-Sim PTX: ERROR ** source param size does not match known "
-               "register sizes\n");
-        break;
+        case 1:
+          m_reg_value.u8 = *(unsigned char *)source_param_value_array;
+          break;
+        case 2:
+          m_reg_value.u16 = *(unsigned short *)source_param_value_array;
+          break;
+        case 4:
+          m_reg_value.u32 = *(unsigned int *)source_param_value_array;
+          break;
+        case 8:
+          m_reg_value.u64 = *(unsigned long long *)source_param_value_array;
+          break;
+        default:
+          printf(
+              "GPGPU-Sim PTX: ERROR ** source param size does not match known "
+              "register sizes\n");
+          break;
       }
     } else {
       // param
@@ -1389,7 +1529,7 @@ public:
 
   const symbol *get_dst() const { return m_dst; }
 
-private:
+ private:
   // destination of copy
   const symbol *m_dst;
 
@@ -1421,20 +1561,17 @@ void copy_buffer_list_into_frame(ptx_thread_info *thread,
 void copy_buffer_to_frame(ptx_thread_info *thread, const arg_buffer_t &a);
 
 struct textureInfo {
-  unsigned int texel_size; // size in bytes, e.g. (channelDesc.x+y+z+w)/8
+  unsigned int texel_size;  // size in bytes, e.g. (channelDesc.x+y+z+w)/8
   unsigned int Tx,
-      Ty; // tiling factor dimensions of layout of texels per 64B cache block
-  unsigned int Tx_numbits, Ty_numbits; // log2(T)
-  unsigned int texel_size_numbits;     // log2(texel_size)
+      Ty;  // tiling factor dimensions of layout of texels per 64B cache block
+  unsigned int Tx_numbits, Ty_numbits;  // log2(T)
+  unsigned int texel_size_numbits;      // log2(texel_size)
 };
 
 extern std::map<std::string, symbol_table *> g_sym_name_to_symbol_table;
 
-extern bool g_keep_intermediate_files;
-
 void gpgpu_ptx_assemble(std::string kname, void *kinfo);
 #include "../option_parser.h"
-void ptx_reg_options(option_parser_t opp);
 unsigned ptx_kernel_shmem_size(void *kernel_impl);
 unsigned ptx_kernel_nregs(void *kernel_impl);
 
